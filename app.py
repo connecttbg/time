@@ -1,3 +1,4 @@
+from flask import Flask, request, redirect, url_for, render_template_string, flash, abort, send_file
 # NOTE: SyntaxError remains at line 929, col 49: invalid syntax
 # NOTE: SyntaxError still detected at line 592, offset 28: invalid syntax. Perhaps you forgot a comma?
 from datetime import datetime, date, timedelta
@@ -14,11 +15,13 @@ from openpyxl import Workbook
 # --- CONFIG ---
 APP_TITLE = "EKKO NOR AS – Rejestracja czasu"
 DB_PATH = "sqlite:///ekko_time.db"
-SECRET_KEY = "change-me-please"  # ZMIEŃ w produkcji
+import os
+SECRET_KEY = os.getenv("SECRET_KEY","change-me-please")  # ZMIEŃ w produkcji
 BACKUPS_DIR = os.path.join(os.getcwd(), 'backups')
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config['SESSION_COOKIE_NAME'] = os.getenv('SESSION_COOKIE_NAME','ekko_session')
 app.config["SECRET_KEY"] = SECRET_KEY
 app.config["SQLALCHEMY_DATABASE_URI"] = DB_PATH
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -71,11 +74,6 @@ with app.app_context():
 
 @login_manager.user_loader
 def load_user(uid): return User.query.get(int(uid))
-
-# --- HEALTH CHECK (no auth) ---
-@app.route("/healthz")
-def healthz():
-    return "OK", 200
 
 # --- UI helpers ---
 
@@ -141,7 +139,7 @@ def layout(title, body):
 </head><body>
 <nav class="navbar navbar-expand-lg">
   <div class="container">
-    <a class="navbar-brand smallcaps" href="{{ url_for('dashboard') }}">EKKO NOR AS</a>
+    <a class="navbar-brand smallcaps d-flex align-items-center" href="{{ url_for('dashboard') }}"><img src="{{ url_for('static', filename='ekko_logo.png') }}" alt="EKKO" style="height:28px" class="me-2">EKKO NOR AS</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
@@ -218,7 +216,7 @@ def login():
   <div class="col-md-6">
     <div class="card shadow-sm">
       <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
-      <div class="card-body"><p class="text-muted">System rejestracji czasu pracy dla Ekko Nor AS.</p><p class="text-muted" style="color:#bdbdbd !important">System rejestracji czasu pracy dla Ekko Nor AS.</p>
+      <div class="card-body"><div class="text-center mb-3"><img src="{{ url_for('static', filename='ekko_logo.png') }}" alt="EKKO logo" style="height:48px"></div><p class="text-muted">System rejestracji czasu pracy dla Ekko Nor AS.</p><p class="text-muted" style="color:#bdbdbd !important">System rejestracji czasu pracy dla Ekko Nor AS.</p>
         <form method="post">
           <div class="mb-3">
             <label class="form-label">Email</label>
@@ -620,7 +618,7 @@ def admin_projects():
               <td>{{ p.name }}</td>
               <td>{% if p.is_active %}<span class="badge bg-success">aktywne</span>{% else %}<span class="badge bg-secondary">archiwalne</span>{% endif %}</td>
               <td class="text-end">
-                <form class="d-inline" method="post" action="{{ url_for('update_project', pid=p.id) }}">
+                <form class="d-inline" method="post" action="{{ url_for('admin_update_project', pid=p.id) }}">
                   <input class="form-control form-control-sm d-inline-block" style="width:200px" name="name" value="{{ p.name }}">
                   <button class="btn btn-sm btn-outline-success">Zapisz</button>
                 </form>
@@ -648,9 +646,9 @@ def toggle_project(pid):
 
 # --- ADMIN: USERS ---
 
-@app.route("/admin/projects/<int:pid>/update", methods=["POST"], endpoint="update_project")
+@app.route("/admin/projects/<int:pid>/update", methods=["POST"], endpoint="admin_update_project")
 @login_required
-def update_project(pid):
+def admin_update_project(pid):
     if not current_user.is_admin: abort(403)
     p = Project.query.get_or_404(pid)
     new_name = (request.form.get("name") or "").strip()
@@ -1236,12 +1234,12 @@ def user_add_entry():
 
 
 
+
 @app.route("/admin/backup", methods=["GET","POST"])
 @login_required
 def admin_backup():
-    if not current_user.is_admin: abort(403)
-
-    # Handle restore from uploaded file (optional)
+    if not current_user.is_admin:
+        abort(403)
     if request.method == "POST" and 'dbfile' in request.files:
         f = request.files.get("dbfile")
         if not f or f.filename == "":
@@ -1256,33 +1254,25 @@ def admin_backup():
             pass
         target = os.path.join(os.getcwd(), "ekko_time.db")
         os.replace(tmp_path, target)
-        flash("Przywrócono bazę z wgranego pliku. (W razie problemów uruchom aplikację ponownie.)")
+        flash("Przywrócono bazę z wgranego pliku.")
         return redirect(url_for("admin_backup"))
-
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
-  <div class="card-header">Kopia zapasowa / Przywracanie</div>
+  <div class="card-header">Kopia zapasowa / Przywrócenie</div>
   <div class="card-body">
     <a class="btn btn-primary" href="{{ url_for('download_backup') }}">Pobierz kopię teraz</a>
-    <span class="ms-2 text-muted">Plik zostanie pobrany bez zapisywania na serwerze.</span>
-
+    <span class="ms-2 text-muted">Pobieramy bez zapisu na serwerze.</span>
     <hr>
     <h6>Przywróć z wgranego pliku</h6>
     <form method="post" enctype="multipart/form-data">
       <input class="form-control" type="file" name="dbfile" accept=".db,.sqlite,.sqlite3" required>
       <button class="btn btn-danger mt-2">Przywróć</button>
     </form>
-
-    <p class="mt-3 text-muted">Operacja przywracania zastępuje <code>ekko_time.db</code>. Nieodwracalne.</p>
+    <p class="mt-3 text-muted">Przywracanie zastępuje plik <code>ekko_time.db</code>.</p>
   </div>
 </div>
 """)
     return layout("Kopia / Przywrócenie", body)
-
-
-
-
-
 @app.route("/admin/backup/download-now", methods=["GET"])
 @login_required
 def download_backup():
@@ -1333,65 +1323,7 @@ def __admin_create_backup_action():
     return redirect(url_for("admin_backup"))
 # --- RUN ---
 if __name__ == "__main__":
-    import logging, sys
-    # Log to file and console
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler("error.log", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-    print(">>> Starting EKKO NOR AS Flask app on http://127.0.0.1:5000", flush=True)
-    app.run(host="127.0.0.1", port=5000, debug=True)
-@app.route("/admin/projects/<int:pid>/update", methods=["POST"])
-@login_required
-def update_project(pid):
-    if not current_user.is_admin: abort(403)
-    p = Project.query.get_or_404(pid)
-    new_name = (request.form.get("name") or "").strip()
-    if new_name and new_name != p.name:
-        # sprawdź kolizję nazw
-        exists = Project.query.filter(Project.id!=p.id, Project.name==new_name).first()
-        if exists:
-            flash("Projekt o takiej nazwie już istnieje.")
-        else:
-            p.name = new_name
-            db.session.commit()
-            flash("Zmieniono nazwę projektu.")
-    return redirect(url_for("admin_projects"))
-
-
-
-
-@app.route("/admin/backup/create", methods=["POST"])
-@login_required
-def create_backup():
-    if not current_user.is_admin: abort(403)
-    # Ensure DB file exists; force a commit to touch the file if needed
-    try:
-        db.session.commit()
-    except Exception:
-        pass
-    src = os.path.join(os.getcwd(), "ekko_time.db")
-    if not os.path.exists(src):
-        # Create an empty DB by ensuring tables are created
-        with app.app_context():
-            db.create_all()
-        # touch file
-        open(src, "ab").close()
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dst_name = f"ekko_time_{ts}.db"
-    dst = os.path.join(BACKUPS_DIR, dst_name)
-    try:
-        import shutil
-        shutil.copy2(src, dst)
-        flash(f"Utworzono kopię: {dst_name}")
-    except Exception as e:
-        flash(f"Błąd tworzenia kopii: {e}")
-    return redirect(url_for("admin_backup"))
+    app.run(debug=True)
 
 
 @app.route("/admin/backup/restore-from-file", methods=["POST"])
