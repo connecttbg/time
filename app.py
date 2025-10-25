@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, render_template_string, flash, abort, send_file
+import os
 # NOTE: SyntaxError remains at line 929, col 49: invalid syntax
 # NOTE: SyntaxError still detected at line 592, offset 28: invalid syntax. Perhaps you forgot a comma?
 from datetime import datetime, date, timedelta
@@ -15,13 +15,11 @@ from openpyxl import Workbook
 # --- CONFIG ---
 APP_TITLE = "EKKO NOR AS – Rejestracja czasu"
 DB_PATH = "sqlite:///ekko_time.db"
-import os
-SECRET_KEY = os.getenv("SECRET_KEY","change-me-please")  # ZMIEŃ w produkcji
+SECRET_KEY = "change-me-please"  # ZMIEŃ w produkcji
 BACKUPS_DIR = os.path.join(os.getcwd(), 'backups')
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.config['SESSION_COOKIE_NAME'] = os.getenv('SESSION_COOKIE_NAME','ekko_session')
 app.config["SECRET_KEY"] = SECRET_KEY
 app.config["SQLALCHEMY_DATABASE_URI"] = DB_PATH
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -139,7 +137,7 @@ def layout(title, body):
 </head><body>
 <nav class="navbar navbar-expand-lg">
   <div class="container">
-    <a class="navbar-brand smallcaps d-flex align-items-center" href="{{ url_for('dashboard') }}"><img src="{{ url_for('static', filename='ekko_logo.png') }}" alt="EKKO" style="height:28px" class="me-2">EKKO NOR AS</a>
+    <a class="navbar-brand smallcaps" href="{{ url_for('dashboard') }}">EKKO NOR AS</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
@@ -216,7 +214,7 @@ def login():
   <div class="col-md-6">
     <div class="card shadow-sm">
       <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
-      <div class="card-body"><div class="text-center mb-3"><img src="{{ url_for('static', filename='ekko_logo.png') }}" alt="EKKO logo" style="height:48px"></div><p class="text-muted">System rejestracji czasu pracy dla Ekko Nor AS.</p><p class="text-muted" style="color:#bdbdbd !important">System rejestracji czasu pracy dla Ekko Nor AS.</p>
+      <div class="card-body"><p class="text-muted text-center">System rejestracji czasu pracy dla Ekko Nor AS.</p>
         <form method="post">
           <div class="mb-3">
             <label class="form-label">Email</label>
@@ -246,7 +244,7 @@ def logout():
 def dashboard():
     projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
     today = date.today()
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="row g-4">
   <div class="col-lg-6">
     <div class="card">
@@ -332,7 +330,7 @@ def day_view(day):
     total = sum(r.minutes for r in rows)
     extra = sum(r.minutes for r in rows if r.is_extra)
     overtime = sum(r.minutes for r in rows if r.is_overtime)
-    body = render_template_string(""")
+    body = render_template_string("""
 <h5>{{ d.strftime('%Y-%m-%d') }}</h5>
 <table class="table table-sm align-middle">
   <thead><tr><th>Projekt</th><th>Notatka</th><th>HH:MM</th><th>Extra</th><th>Nadgodziny</th><th></th></tr></thead>
@@ -395,7 +393,7 @@ def entries_view():
         mins = [r.minutes for r in rows]
         return sum(mins)
 
-    body = render_template_string(""")
+    body = render_template_string("""
 <h5>Moje wpisy – {{ '%04d-%02d' % (year, month) }}</h5>
 <a class="btn btn-sm btn-success" href="{{ url_for('user_add_entry') }}">Dodaj godziny</a>
 <div class="mb-3">
@@ -471,7 +469,7 @@ def edit_entry(entry_id):
         flash("Zapisano.")
         return redirect(url_for("entries_view"))
     projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
   <div class="card-body">
@@ -618,7 +616,7 @@ def admin_projects():
               <td>{{ p.name }}</td>
               <td>{% if p.is_active %}<span class="badge bg-success">aktywne</span>{% else %}<span class="badge bg-secondary">archiwalne</span>{% endif %}</td>
               <td class="text-end">
-                <form class="d-inline" method="post" action="{{ url_for('admin_update_project', pid=p.id) }}">
+                <form class="d-inline" method="post" action="{{ url_for('update_project', pid=p.id) }}">
                   <input class="form-control form-control-sm d-inline-block" style="width:200px" name="name" value="{{ p.name }}">
                   <button class="btn btn-sm btn-outline-success">Zapisz</button>
                 </form>
@@ -646,9 +644,9 @@ def toggle_project(pid):
 
 # --- ADMIN: USERS ---
 
-@app.route("/admin/projects/<int:pid>/update", methods=["POST"], endpoint="admin_update_project")
+@app.route("/admin/projects/<int:pid>/update", methods=["POST"], endpoint="update_project")
 @login_required
-def admin_update_project(pid):
+def update_project(pid):
     if not current_user.is_admin: abort(403)
     p = Project.query.get_or_404(pid)
     new_name = (request.form.get("name") or "").strip()
@@ -709,7 +707,7 @@ def admin_users():
             flash("Zmieniono status konta.")
         return redirect(url_for("admin_users"))
     users = User.query.order_by(User.is_admin.desc(), User.name).all()
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="row g-4">
   <div class="col-lg-8">
     <div class="card">
@@ -770,6 +768,7 @@ def admin_users():
     return layout("Pracownicy (Admin)", body)
 
 # --- ADMIN: REPORTS (all users) ---
+
 @app.route("/admin/reports", methods=["GET","POST"])
 @login_required
 def admin_reports():
@@ -786,16 +785,16 @@ def admin_reports():
         d_from_dt = dtparse.parse(d_from).date()
         d_to_dt = dtparse.parse(d_to).date()
         q = Entry.query.join(User).join(Project).filter(
-            Entry.work_date>=d_from_dt,
-            Entry.work_date<=d_to_dt
+            Entry.work_date >= d_from_dt,
+            Entry.work_date <= d_to_dt
         )
         if user_id and user_id != "all":
-            q = q.filter(Entry.user_id==int(user_id))
+            q = q.filter(Entry.user_id == int(user_id))
         if project_id and project_id != "all":
-            q = q.filter(Entry.project_id==int(project_id))
+            q = q.filter(Entry.project_id == int(project_id))
         rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
 
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
   <div class="card-body">
@@ -863,18 +862,21 @@ def admin_reports():
 """, users=users, projects=projects, rows=rows, fmt=fmt_hhmm)
     return layout("Raport (Admin)", body)
 
+
+
 def _admin_query_rows(args):
     d_from_dt = dtparse.parse(args.get("from")).date()
     d_to_dt = dtparse.parse(args.get("to")).date()
     q = Entry.query.join(User).join(Project).filter(
-        Entry.work_date>=d_from_dt,
-        Entry.work_date<=d_to_dt
+        Entry.work_date >= d_from_dt,
+        Entry.work_date <= d_to_dt
     )
     if args.get("user_id") and args.get("user_id") != "all":
-        q = q.filter(Entry.user_id==int(args.get("user_id")))
+        q = q.filter(Entry.user_id == int(args.get("user_id")))
     if args.get("project_id") and args.get("project_id") != "all":
-        q = q.filter(Entry.project_id==int(args.get("project_id")))
+        q = q.filter(Entry.project_id == int(args.get("project_id")))
     return q.order_by(Entry.work_date.asc(), Entry.id.asc()).all(), d_from_dt, d_to_dt
+
 
 @app.route("/admin/export.csv")
 @login_required
@@ -961,7 +963,7 @@ def summary_view():
     prev_first = (cur_first.replace(day=1) - relativedelta(months=1))
     next_first = (cur_first.replace(day=1) + relativedelta(months=1))
 
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
   <div class="card-body">
@@ -1037,7 +1039,7 @@ def admin_monthly():
     prev_first = (d_from.replace(day=1) - relativedelta(months=1))
     next_first = (d_from.replace(day=1) + relativedelta(months=1))
 
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header text-center"><h5 class="m-0">Ekko Nor AS – Rejestrator czasu pracy</h5></div>
   <div class="card-body">
@@ -1101,7 +1103,7 @@ def admin_add_entry():
         db.session.commit()
         flash(f"Dodano wpis czasu dla: {u.name}.")
         return redirect(url_for("admin_reports", **({"from": work_date.isoformat(), "to": work_date.isoformat(), "user_id": user_id})))
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header">Dodaj godziny (Admin)</div>
   <div class="card-body">
@@ -1183,7 +1185,7 @@ def user_add_entry():
         db.session.commit()
         flash("Dodano wpis.")
         return redirect(url_for("entries_view"))
-    body = render_template_string(""")
+    body = render_template_string("""
 <div class="card">
   <div class="card-header">Dodaj godziny</div>
   <div class="card-body">
@@ -1234,12 +1236,12 @@ def user_add_entry():
 
 
 
-
 @app.route("/admin/backup", methods=["GET","POST"])
 @login_required
 def admin_backup():
-    if not current_user.is_admin:
-        abort(403)
+    if not current_user.is_admin: abort(403)
+
+    # Handle restore from uploaded file (optional)
     if request.method == "POST" and 'dbfile' in request.files:
         f = request.files.get("dbfile")
         if not f or f.filename == "":
@@ -1254,25 +1256,33 @@ def admin_backup():
             pass
         target = os.path.join(os.getcwd(), "ekko_time.db")
         os.replace(tmp_path, target)
-        flash("Przywrócono bazę z wgranego pliku.")
+        flash("Przywrócono bazę z wgranego pliku. (W razie problemów uruchom aplikację ponownie.)")
         return redirect(url_for("admin_backup"))
+
     body = render_template_string("""
 <div class="card">
-  <div class="card-header">Kopia zapasowa / Przywrócenie</div>
+  <div class="card-header">Kopia zapasowa / Przywracanie</div>
   <div class="card-body">
     <a class="btn btn-primary" href="{{ url_for('download_backup') }}">Pobierz kopię teraz</a>
-    <span class="ms-2 text-muted">Pobieramy bez zapisu na serwerze.</span>
+    <span class="ms-2 text-muted">Plik zostanie pobrany bez zapisywania na serwerze.</span>
+
     <hr>
     <h6>Przywróć z wgranego pliku</h6>
     <form method="post" enctype="multipart/form-data">
       <input class="form-control" type="file" name="dbfile" accept=".db,.sqlite,.sqlite3" required>
       <button class="btn btn-danger mt-2">Przywróć</button>
     </form>
-    <p class="mt-3 text-muted">Przywracanie zastępuje plik <code>ekko_time.db</code>.</p>
+
+    <p class="mt-3 text-muted">Operacja przywracania zastępuje <code>ekko_time.db</code>. Nieodwracalne.</p>
   </div>
 </div>
 """)
     return layout("Kopia / Przywrócenie", body)
+
+
+
+
+
 @app.route("/admin/backup/download-now", methods=["GET"])
 @login_required
 def download_backup():
@@ -1326,6 +1336,8 @@ if __name__ == "__main__":
     app.run(debug=True)
 
 
+# (duplikat update_project usunięty)
+# (duplikat create_backup usunięty)
 @app.route("/admin/backup/restore-from-file", methods=["POST"])
 @login_required
 def restore_from_backup_file():
@@ -1350,7 +1362,6 @@ def restore_from_backup_file():
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
-
 
 
 
