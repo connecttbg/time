@@ -315,6 +315,77 @@ def add_entry():
         flash("Nieprawidłowy projekt.")
         return redirect(url_for("dashboard"))
 
+
+# --- USER: ADD ENTRY (form + submit) ---
+@app.route("/entries/add", methods=["GET","POST"], endpoint="user_add_entry")
+@login_required
+def user_add_entry():
+    from datetime import date as _date
+    projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
+    if request.method == "POST":
+        work_date = dtparse.parse(request.form["work_date"]).date()
+        project_id = int(request.form["project_id"])
+        minutes = parse_hhmm(request.form["hhmm"])
+        note = request.form.get("note") or None
+        is_extra = bool(request.form.get("is_extra"))
+        is_overtime = bool(request.form.get("is_overtime"))
+
+        proj = Project.query.get(project_id)
+        if not proj or not proj.is_active:
+            flash("Nieprawidłowy projekt.")
+            return redirect(url_for("user_add_entry"))
+
+        e = Entry(user_id=current_user.id, project_id=project_id, work_date=work_date,
+                  minutes=minutes, note=note, is_extra=is_extra, is_overtime=is_overtime)
+        db.session.add(e)
+        db.session.commit()
+        flash("Dodano wpis.")
+        return redirect(url_for("entries_view"))
+    body = render_template_string("""<div class="card">
+  <div class="card-header">Dodaj godziny</div>
+  <div class="card-body">
+    <form method="post">
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label">Data</label>
+          <input class="form-control" type="date" name="work_date" value="{{ _date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id" required>
+            {% for p in projects %}
+              <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Czas (HH:MM)</label>
+          <input class="form-control" name="hhmm" placeholder="np. 1:30" required>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Notatka (opcjonalnie)</label>
+          <input class="form-control" name="note" placeholder="Opis prac...">
+        </div>
+        <div class="col-12">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" name="is_extra" id="user_extra">
+            <label class="form-check-label" for="user_extra">Godziny extra</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" name="is_overtime" id="user_ot">
+            <label class="form-check-label" for="user_ot">Nadgodziny</label>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3">
+        <button class="btn btn-success">Zapisz</button>
+        <a class="btn btn-outline-secondary" href="{{ url_for('entries_view') }}">Anuluj</a>
+      </div>
+    </form>
+  </div>
+</div>
+""", projects=projects, _date=_date)
+    return layout("Dodaj godziny", body)
     e = Entry(user_id=current_user.id, project_id=project_id, work_date=work_date,
               minutes=minutes, note=note, is_extra=is_extra, is_overtime=is_overtime)
     db.session.add(e)
