@@ -187,6 +187,7 @@ BASE = """
     {% if current_user.is_authenticated %}
     <div class="ms-auto d-flex align-items-center gap-2">
       {% if current_user.is_admin %}
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_overview') }}">Admin</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_users') }}">Pracownicy</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_projects') }}">Projekty</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_entries') }}">Godziny (admin)</a>
@@ -471,6 +472,40 @@ def delete_entry(entry_id):
     return redirect(url_for("dashboard" if not current_user.is_admin else "admin_entries"))
 
 
+# --- Admin: overview (monthly totals) ---
+@app.route("/admin", methods=["GET"])
+@login_required
+def admin_overview():
+    require_admin()
+    ym = request.args.get("month")
+    if not ym:
+        today = date.today()
+        ym = f"{today.year:04d}-{today.month:02d}"
+    year, month = map(int, ym.split("-"))
+    m_from = date(year, month, 1)
+    m_to = (m_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    total = db.session.query(db.func.sum(Entry.minutes)).filter(Entry.work_date>=m_from, Entry.work_date<=m_to).scalar() or 0
+
+    body = render_template_string("""
+<div class="card p-3">
+  <h5 class="mb-3">Podsumowanie miesiąca</h5>
+  <form class="row g-2 mb-3" method="get">
+    <div class="col-md-3">
+      <label class="form-label">Miesiąc</label>
+      <input class="form-control" type="month" name="month" value="{{ ym }}">
+    </div>
+    <div class="col-md-2 d-flex align-items-end">
+      <button class="btn btn-outline-primary">Pokaż</button>
+    </div>
+  </form>
+  <div class="display-6">{{ fmt(total) }}</div>
+  <div class="text-muted">Łącznie zapisanych godzin w wybranym miesiącu</div>
+</div>
+""", ym=ym, total=total, fmt=fmt_hhmm)
+    return layout("Admin – Podsumowanie", body)
+
+
 # --- Admin: users ---
 @app.route("/admin/users", methods=["GET", "POST"])
 @login_required
@@ -596,12 +631,12 @@ def admin_user_edit(uid):
     return layout("Edycja pracownika", body)
 
 
-# --- Admin: projects ---
+# --- Admin: projects (CRUD) ---
 @app.route("/admin/projects", methods=["GET", "POST"])
 @login_required
 def admin_projects():
     require_admin()
-    if request.method == "POST":
+    if request.method == "POST" and request.form.get("action") == "create":
         name = request.form.get("name").strip()
         if not name:
             flash("Nazwa nie może być pusta.")
@@ -619,18 +654,36 @@ def admin_projects():
   <div class="d-flex justify-content-between align-items-center">
     <h5 class="mb-0">Projekty</h5>
     <form class="d-flex" method="post">
+      <input type="hidden" name="action" value="create">
       <input class="form-control me-2" name="name" placeholder="Nazwa projektu" required>
       <button class="btn btn-primary">Dodaj</button>
     </form>
   </div>
   <div class="table-responsive mt-3">
     <table class="table table-sm align-middle">
-      <thead><tr><th>Nazwa</th><th>Aktywny</th></tr></thead>
+      <thead><tr><th style="width:55%">Nazwa</th><th style="width:20%">Aktywny</th><th class="text-end" style="width:25%">Akcje</th></tr></thead>
       <tbody>
       {% for p in projs %}
         <tr>
-          <td>{{ p.name }}</td>
-          <td>{% if p.is_active %}✔{% else %}-{% endif %}</td>
+          <td>
+            <form class="d-flex" method="post" action="{{ url_for('admin_project_update', pid=p.id) }}">
+              <input class="form-control form-control-sm me-2" name="name" value="{{ p.name }}" required>
+              <button class="btn btn-sm btn-outline-primary">Zmień nazwę</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="{{ url_for('admin_project_toggle', pid=p.id) }}">
+              <input type="hidden" name="is_active" value="{{ 1 if not p.is_active else 0 }}">
+              <button class="btn btn-sm {% if p.is_active %}btn-success{% else %}btn-secondary{% endif %}">
+                {% if p.is_active %}Aktywny{% else %}Nieaktywny{% endif %}
+              </button>
+            </form>
+          </td>
+          <td class="text-end">
+            <form class="d-inline" method="post" action="{{ url_for('admin_project_delete', pid=p.id) }}" onsubmit="return confirm('Usunąć projekt? (wpisy pozostaną)')">
+              <button class="btn btn-sm btn-outline-danger">Usuń</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -640,8 +693,47 @@ def admin_projects():
 """, projs=projs)
     return layout("Projekty", body)
 
+@app.route("/admin/projects/<int:pid>/update", methods=["POST"])
+@login_required
+def admin_project_update(pid):
+    require_admin()
+    p = Project.query.get_or_404(pid)
+    new_name = (request.form.get("name") or "").strip()
+    if not new_name:
+        flash("Nazwa nie może być pusta.")
+    elif Project.query.filter(Project.id != pid, Project.name == new_name).first():
+        flash("Projekt o takiej nazwie już istnieje.")
+    else:
+        p.name = new_name
+        db.session.commit()
+        flash("Zmieniono nazwę projektu.")
+    return redirect(url_for("admin_projects"))
 
-# --- Admin: entries (full) ---
+@app.route("/admin/projects/<int:pid>/toggle", methods=["POST"])
+@login_required
+def admin_project_toggle(pid):
+    require_admin()
+    p = Project.query.get_or_404(pid)
+    want_active = request.form.get("is_active")
+    if want_active is not None:
+        p.is_active = True if str(want_active) == "1" else False
+    else:
+        p.is_active = not p.is_active
+    db.session.commit()
+    return redirect(url_for("admin_projects"))
+
+@app.route("/admin/projects/<int:pid>/delete", methods=["POST"])
+@login_required
+def admin_project_delete(pid):
+    require_admin()
+    p = Project.query.get_or_404(pid)
+    db.session.delete(p)
+    db.session.commit()
+    flash("Usunięto projekt.")
+    return redirect(url_for("admin_projects"))
+
+
+# --- Admin: entries (full add/edit/delete + filter) ---
 def _all_users_ordered():
     return User.query.order_by(User.name.asc()).all()
 
@@ -882,12 +974,6 @@ def _make_zip_bytes(path)->bytes:
     return mem.read()
 
 def _replace_db_from_zipfileobj(fileobj):
-    """
-    Bezpieczne przywracanie bazy z ZIP (Render/Docker-safe):
-    - zapis tymczasowy w TYM SAMYM katalogu co DB_FILE (brak EXDEV),
-    - zamyka sesję i połączenia,
-    - próbuje os.replace(); na EXDEV kopiuje bajty (shutil.copyfile).
-    """
     try:
         fileobj.seek(0)
     except Exception:
@@ -1045,7 +1131,7 @@ def admin_backup_restore_saved(fname):
     return redirect(url_for("admin_backup"))
 
 
-# --- Reports (simple viewer) ---
+# --- Reports (with Excel export) ---
 @app.route("/admin/reports", methods=["GET"])
 @login_required
 def admin_reports():
@@ -1099,8 +1185,11 @@ def admin_reports():
         {% endfor %}
       </select>
     </div>
-    <div class="col-12">
+    <div class="col-12 d-flex gap-2">
       <button class="btn btn-primary">Pokaż</button>
+      {% if rows %}
+        <a class="btn btn-success" href="{{ url_for('admin_reports_export', from=request.args.get('from'), to=request.args.get('to'), user_id=request.args.get('user_id','all'), project_id=request.args.get('project_id','all')) }}">Eksport do Excel</a>
+      {% endif %}
     </div>
   </form>
   {% if rows %}
@@ -1126,6 +1215,60 @@ def admin_reports():
 </div>
 """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
     return layout("Raport", body)
+
+@app.route("/admin/reports/export")
+@login_required
+def admin_reports_export():
+    require_admin()
+    try:
+        from openpyxl import Workbook
+    except Exception:
+        abort(500, "Brak pakietu openpyxl (sprawdź requirements.txt)")
+
+    d_from = request.args.get("from")
+    d_to = request.args.get("to")
+    user_id = request.args.get("user_id", "all")
+    project_id = request.args.get("project_id", "all")
+    if not d_from or not d_to:
+        abort(400)
+
+    d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
+    d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
+    q = Entry.query.join(User).join(Project).filter(
+        Entry.work_date >= d_from_dt,
+        Entry.work_date <= d_to_dt
+    )
+    if user_id != "all":
+        q = q.filter(Entry.user_id == int(user_id))
+    if project_id != "all":
+        q = q.filter(Entry.project_id == int(project_id))
+    rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Raport"
+    ws.append(["Data", "Pracownik", "Projekt", "Godziny (HH:MM)", "Extra", "Nadgodziny", "Notatka"])
+    for it in rows:
+        ws.append([
+            it.work_date.isoformat(),
+            it.user.name,
+            it.project.name,
+            fmt_hhmm(it.minutes),
+            "TAK" if it.is_extra else "",
+            "TAK" if it.is_overtime else "",
+            it.note or ""
+        ])
+
+    # podsumowanie
+    total_min = sum(r.minutes for r in rows)
+    ws.append([])
+    ws.append(["Razem", "", "", fmt_hhmm(total_min), "", "", ""])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"raport_{d_from}_{d_to}.xlsx"
+    return send_file(buf, as_attachment=True, download_name=fname, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 if __name__ == "__main__":
