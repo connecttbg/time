@@ -182,7 +182,7 @@ BASE = """
   <div class="container-fluid">
     <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') if current_user.is_authenticated else url_for('login') }}">
       <img src="{{ url_for('static', filename='ekko_logo.png') }}" class="brand-logo me-2" alt="logo">
-      <span class="fw-semibold">EKKO NOR AS</span>
+      
     </a>
     {% if current_user.is_authenticated %}
     <div class="ms-auto d-flex align-items-center gap-2">
