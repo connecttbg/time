@@ -1,6 +1,10 @@
 
-EKKO NOR AS – Rejestrator czasu pracy (v56 Render ready)
-Najważniejsze: naprawa przywracania kopii na Render.com (EXDEV / cross-device).
+EKKO NOR AS – Rejestrator czasu pracy (v57 FULL)
+- Admin może dodawać/edytować/usuwać wpisy godzin dla dowolnego pracownika (Godziny admin).
+- Zarządzanie pracownikami (dodawanie, edycja, reset hasła).
+- Projekty (dodawanie).
+- Backup & Restore Render-safe (EXDEV fix).
+- Czas w formacie HH:MM.
 
 Start lokalny:
   python -m venv venv
@@ -11,8 +15,7 @@ Start lokalny:
 
 Render.com:
   - Dodaj Disk i zamontuj pod /var/data
-  - Sekretne zmienne nie są wymagane (SECRET_KEY możesz dodać samodzielnie)
-  - Start Command: gunicorn app:app
+  - Start command: gunicorn app:app
 
 Logowanie startowe:
   admin@local / admin123
