@@ -1,5 +1,7 @@
 
-EKKO NOR AS – Rejestrator czasu pracy (v54 full)
+EKKO NOR AS – Rejestrator czasu pracy (v55 restore fix)
+Nowe: bezpieczne przywracanie kopii (zamykanie połączeń, atomowa podmiana DB).
+
 Start lokalny:
   python -m venv venv
   # Windows: venv\Scripts\activate
@@ -9,5 +11,3 @@ Start lokalny:
 
 Logowanie startowe:
   admin@local / admin123
-
-Czas wpisujemy jako HH:MM (np. 1:30). Kopie działają nawet przy świeżej instalacji.

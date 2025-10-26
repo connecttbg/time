@@ -2,6 +2,7 @@
 import os
 import io
 import zipfile
+import tempfile
 from datetime import datetime, date, timedelta
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
@@ -77,15 +78,11 @@ def fmt_hhmm(minutes: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 def parse_hhmm(value: str) -> int:
-    """
-    Akceptuje '1:30', '01:30', '2', '2h', '90', '0:45', '1.5'
-    Zwraca minuty (int).
-    """
     if not value:
         return 0
     v = value.strip().lower()
     if v.isdigit():
-        return int(v)  # traktuj jako minuty
+        return int(v)
     if 'h' in v:
         try:
             left, *rest = v.split('h')
@@ -100,7 +97,7 @@ def parse_hhmm(value: str) -> int:
         m = int(mm) if mm else 0
         return h*60 + m
     try:
-        f = float(v.replace(',', '.'))  # np. '1.5' h
+        f = float(v.replace(',', '.'))
         return int(round(f*60))
     except Exception:
         return 0
@@ -119,9 +116,6 @@ def require_admin():
         abort(403)
 
 def ensure_db_file():
-    """
-    Upewnia się, że SQLite utworzył fizyczny plik bazy i że są tabele.
-    """
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     with app.app_context():
         db.create_all()
@@ -154,7 +148,7 @@ def init_db():
 init_db()
 
 
-# --- Base layout (jasny, czytelny) ---
+# --- Base layout (jasny) ---
 BASE = """
 <!doctype html>
 <html lang="pl">
@@ -700,89 +694,6 @@ def admin_project_update(pid):
     return redirect(url_for("admin_projects"))
 
 
-# --- Admin: reports ---
-@app.route("/admin/reports", methods=["GET"])
-@login_required
-def admin_reports():
-    require_admin()
-    d_from = request.args.get("from")
-    d_to = request.args.get("to")
-    user_id = request.args.get("user_id")
-    project_id = request.args.get("project_id")
-    users = User.query.order_by(User.name).all()
-    projects = Project.query.order_by(Project.name).all()
-    rows = []
-    if d_from and d_to:
-        d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
-        d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
-        q = Entry.query.join(User).join(Project).filter(
-            Entry.work_date >= d_from_dt,
-            Entry.work_date <= d_to_dt
-        )
-        if user_id and user_id != "all":
-            q = q.filter(Entry.user_id == int(user_id))
-        if project_id and project_id != "all":
-            q = q.filter(Entry.project_id == int(project_id))
-        rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
-    body = render_template_string("""
-<div class="card p-3">
-  <h5 class="mb-3">Raport</h5>
-  <form class="row g-2 mb-3" method="get">
-    <div class="col-md-3">
-      <label class="form-label">Od</label>
-      <input class="form-control" type="date" name="from" value="{{ request.args.get('from','') }}" required>
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Do</label>
-      <input class="form-control" type="date" name="to" value="{{ request.args.get('to','') }}" required>
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Pracownik</label>
-      <select class="form-select" name="user_id">
-        <option value="all">Wszyscy</option>
-        {% for u in users %}
-          <option value="{{ u.id }}" {% if request.args.get('user_id')|int == u.id %}selected{% endif %}>{{ u.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Projekt</label>
-      <select class="form-select" name="project_id">
-        <option value="all">Wszystkie</option>
-        {% for p in projects %}
-          <option value="{{ p.id }}" {% if request.args.get('project_id')|int == p.id %}selected{% endif %}>{{ p.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="col-12">
-      <button class="btn btn-primary">Pokaż</button>
-    </div>
-  </form>
-  {% if rows %}
-  <div class="table-responsive">
-    <table class="table table-sm align-middle">
-      <thead><tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Godziny</th><th>Extra</th><th>OT</th><th>Notatka</th></tr></thead>
-      <tbody>
-      {% for it in rows %}
-        <tr>
-          <td>{{ it.work_date.isoformat() }}</td>
-          <td>{{ it.user.name }}</td>
-          <td>{{ it.project.name }}</td>
-          <td>{{ fmt(it.minutes) }}</td>
-          <td>{% if it.is_extra %}✔{% else %}-{% endif %}</td>
-          <td>{% if it.is_overtime %}✔{% else %}-{% endif %}</td>
-          <td>{{ it.note or '' }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-""", rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
-    return layout("Raport", body)
-
-
 # --- Backup / Restore ---
 def _make_zip_bytes(path)->bytes:
     ensure_db_file()
@@ -795,12 +706,50 @@ def _make_zip_bytes(path)->bytes:
     mem.seek(0)
     return mem.read()
 
-def _restore_from_zip(fp):
-    with zipfile.ZipFile(fp, "r") as z:
-        z.extract("app.db", path=os.path.dirname(DB_FILE) or ".")
-        dest = os.path.join(os.path.dirname(DB_FILE) or ".", "app.db")
-        if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-            raise RuntimeError("Plik kopii jest pusty lub niepoprawny.")
+def _replace_db_from_zipfileobj(fileobj):
+    """
+    Bezpieczne przywracanie bazy z ZIP:
+    - zamyka sesję i połączenia,
+    - wyciąga app.db do pliku tymczasowego,
+    - atomowo podmienia DB_FILE,
+    - re-inicjalizuje ORM.
+    """
+    # Upewnij się, że wskaźnik pliku jest na początku
+    try:
+        fileobj.seek(0)
+    except Exception:
+        pass
+
+    # Sprawdź i wyciągnij app.db z ZIP
+    with zipfile.ZipFile(fileobj, "r") as z:
+        names = {n: n for n in z.namelist()}
+        if "app.db" not in names:
+            raise RuntimeError("Brak pliku 'app.db' w archiwum.")
+        with z.open("app.db") as src, tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(src.read())
+
+    # Zamknij ORM/połączenia do obecnej bazy zanim podmienisz plik
+    db.session.remove()
+    try:
+        db.engine.dispose()
+    except Exception:
+        pass
+
+    # Podmień atomowo
+    target_dir = os.path.dirname(DB_FILE) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    final_path = os.path.join(target_dir, "app.db")
+    # Na niektórych systemach trzeba usunąć istniejący plik przed rename
+    if os.path.exists(final_path):
+        try:
+            os.remove(final_path)
+        except Exception as e:
+            raise RuntimeError(f"Nie mogę zastąpić istniejącej bazy: {e}")
+    os.replace(tmp_path, final_path)
+
+    # Re-inicjalizuj bazę (tabele istnieją, ale zapewniamy spójność)
+    ensure_db_file()
 
 @app.route("/admin/backup", methods=["GET"])
 @login_required
@@ -892,7 +841,7 @@ def admin_backup_restore():
         return redirect(url_for("admin_backup"))
     try:
         mem = io.BytesIO(f.read())
-        _restore_from_zip(mem)
+        _replace_db_from_zipfileobj(mem)
         flash("Przywrócono bazę z załączonego pliku.")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
@@ -909,11 +858,97 @@ def admin_backup_restore_saved(fname):
         abort(404)
     try:
         with open(path, "rb") as fp:
-            _restore_from_zip(fp)
+            _replace_db_from_zipfileobj(fp)
         flash(f"Przywrócono bazę z {fname}.")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
+
+
+# --- Reports (kept for completeness) ---
+@app.route("/admin/reports", methods=["GET"])
+@login_required
+def admin_reports():
+    require_admin()
+    d_from = request.args.get("from")
+    d_to = request.args.get("to")
+    user_id = request.args.get("user_id")
+    project_id = request.args.get("project_id")
+    users = User.query.order_by(User.name).all()
+    projects = Project.query.order_by(Project.name).all()
+    rows = []
+    if d_from and d_to:
+        d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
+        d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
+        q = Entry.query.join(User).join(Project).filter(
+            Entry.work_date >= d_from_dt,
+            Entry.work_date <= d_to_dt
+        )
+        if user_id and user_id != "all":
+            q = q.filter(Entry.user_id == int(user_id))
+        if project_id and project_id != "all":
+            q = q.filter(Entry.project_id == int(project_id))
+        rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
+    body = render_template_string("""
+<div class="card p-3">
+  <h5 class="mb-3">Raport</h5>
+  <form class="row g-2 mb-3" method="get">
+    <div class="col-md-3">
+      <label class="form-label">Od</label>
+      <input class="form-control" type="date" name="from" value="{{ request.args.get('from','') }}" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Do</label>
+      <input class="form-control" type="date" name="to" value="{{ request.args.get('to','') }}" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Pracownik</label>
+      <select class="form-select" name="user_id">
+        <option value="all">Wszyscy</option>
+        {% for u in users %}
+          <option value="{{ u.id }}" {% if request.args.get('user_id')|int == u.id %}selected{% endif %}>{{ u.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label">Projekt</label>
+      <select class="form-select" name="project_id">
+        <option value="all">Wszystkie</option>
+        {% for p in projects %}
+          <option value="{{ p.id }}" {% if request.args.get('project_id')|int == p.id %}selected{% endif %}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary">Pokaż</button>
+    </div>
+  </form>
+  {% if rows %}
+  <div class="table-responsive">
+    <table class="table table-sm align-middle">
+      <thead><tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Godziny</th><th>Extra</th><th>OT</th><th>Notatka</th></tr></thead>
+      <tbody>
+      {% for it in rows %}
+        <tr>
+          <td>{{ it.work_date.isoformat() }}</td>
+          <td>{{ it.user.name }}</td>
+          <td>{{ it.project.name }}</td>
+          <td>{{ fmt(it.minutes) }}</td>
+          <td>{% if it.is_extra %}✔{% else %}-{% endif %}</td>
+          <td>{% if it.is_overtime %}✔{% else %}-{% endif %}</td>
+          <td>{{ it.note or '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+""", rows=[],
+    users=User.query.order_by(User.name).all(),
+    projects=Project.query.order_by(Project.name).all(),
+    fmt=fmt_hhmm)
+    return layout("Raport", body)
 
 
 if __name__ == "__main__":
