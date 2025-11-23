@@ -14,10 +14,12 @@ from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_
 
 # --- Flask & DB config ---
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DB_FILE = os.path.join(BASE_DIR, "app.db")
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-me")
 
-DB_FILE = "/var/data/app.db" if os.path.exists("/var/data") else "app.db"
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_FILE}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -209,6 +211,8 @@ BASE = """
   {% endwith %}
   {{ body|safe }}
 </div>
+
+<div class="text-center mt-4 text-muted" style="font-size:12px;">aplikacja utworzona przez dataconnect.no</div>
 </body>
 </html>
 """
@@ -217,6 +221,13 @@ def layout(title, body):
     return render_template_string(BASE, title=title, body=body, fmt=fmt_hhmm)
 
 
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
 # --- Auth ---
 @app.route("/", methods=["GET", "POST"])
 def login():
@@ -260,11 +271,7 @@ def login():
     return layout("Logowanie", body)
 
 
-@app.route("/logout")
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for("login"))
+
 
 
 # --- Dashboard (user) ---
@@ -272,7 +279,7 @@ def logout():
 @login_required
 def dashboard():
     if request.method == "POST":
-        work_date = request.form.get("work_date")
+        work_date_str = request.form.get("work_date")
         project_id = int(request.form.get("project_id"))
         hhmm = request.form.get("hhmm", "0")
         minutes = parse_hhmm(hhmm)
@@ -280,10 +287,26 @@ def dashboard():
         is_overtime = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
 
+        # Konwersja daty z formularza
+        try:
+            work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            flash("Nieprawidłowa data.")
+            return redirect(url_for("dashboard"))
+
+        # Ograniczenie 48h tylko dla zwykłych użytkowników (nie adminów)
+        if not getattr(current_user, "is_admin", False):
+            now = datetime.now()
+            # Traktujemy koniec dnia roboczego jako granicę (23:59:59 danego dnia)
+            end_of_work_date = datetime.combine(work_date, datetime.max.time())
+            if end_of_work_date < now - timedelta(hours=48):
+                flash("Godziny zostaly zablokowane poniewaz mozesz dodawac je maksymalnie do 48h skontaktuj sie z Darkiem +4746572904.")
+                return redirect(url_for("dashboard"))
+
         e = Entry(
             user_id=current_user.id,
             project_id=project_id,
-            work_date=datetime.strptime(work_date, "%Y-%m-%d").date(),
+            work_date=work_date,
             minutes=minutes,
             is_extra=is_extra,
             is_overtime=is_overtime,
@@ -974,47 +997,40 @@ def _make_zip_bytes(path)->bytes:
     return mem.read()
 
 def _replace_db_from_zipfileobj(fileobj):
+    """Podmienia plik bazy danymi z archiwum ZIP (app.db w środku).
+
+    1. Zamyka aktualne połączenia SQLAlchemy.
+    2. Nadpisuje fizyczny plik DB_FILE zawartością app.db z backupu.
+    3. Woła ensure_db_file(), aby upewnić się, że struktura tabel istnieje.
+    """
     try:
         fileobj.seek(0)
     except Exception:
         pass
 
-    target_dir = os.path.dirname(DB_FILE) or "."
+    # Ścieżka do aktualnej bazy
+    target_path = DB_FILE
+    target_dir = os.path.dirname(target_path) or "."
     os.makedirs(target_dir, exist_ok=True)
 
-    with zipfile.ZipFile(fileobj, "r") as z:
-        if "app.db" not in z.namelist():
-            raise RuntimeError("Brak pliku 'app.db' w archiwum.")
-        with z.open("app.db") as src, tempfile.NamedTemporaryFile("wb", dir=target_dir, delete=False) as tmp:
-            shutil.copyfileobj(src, tmp, length=1024*1024)
-            tmp_path = tmp.name
-
-    db.session.remove()
+    # Zamykanie połączeń z bazą
+    try:
+        db.session.remove()
+    except Exception:
+        pass
     try:
         db.engine.dispose()
     except Exception:
         pass
 
-    final_path = os.path.join(target_dir, "app.db")
-    if os.path.exists(final_path):
-        try:
-            os.remove(final_path)
-        except Exception as e:
-            raise RuntimeError(f"Nie mogę zastąpić istniejącej bazy: {e}")
+    # Nadpisanie pliku bazy danymi z kopii zapasowej
+    with zipfile.ZipFile(fileobj, "r") as z:
+        if "app.db" not in z.namelist():
+            raise RuntimeError("Brak pliku 'app.db' w archiwum.")
+        with z.open("app.db") as src, open(target_path, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
 
-    try:
-        os.replace(tmp_path, final_path)
-    except OSError as e:
-        if getattr(e, "errno", None) == errno.EXDEV:
-            shutil.copyfile(tmp_path, final_path)
-            os.remove(tmp_path)
-        else:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-            raise
-
+    # Odtworzenie struktury (jeśli trzeba), bez kasowania danych
     ensure_db_file()
 
 @app.route("/admin/backup", methods=["GET"])
@@ -1025,9 +1041,26 @@ def admin_backup():
     bdir = os.path.join(base, "backups") if base else "backups"
     os.makedirs(bdir, exist_ok=True)
     files = sorted([f for f in os.listdir(bdir) if f.endswith(".zip")])
+
+    # Proste statystyki bieżącej bazy
+    db_path = DB_FILE
+    users = projects = entries = None
+    try:
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+    except Exception:
+        pass
+
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Kopie zapasowe</h5>
+  <p class="small text-muted">
+    Baza danych: <code>{{ db_path }}</code><br>
+    Użytkownicy: {{ users if users is not none else "?" }},
+    Projekty: {{ projects if projects is not none else "?" }},
+    Wpisy: {{ entries if entries is not none else "?" }}
+  </p>
   <form class="d-inline" method="post" action="{{ url_for('admin_backup_create') }}">
     <button class="btn btn-primary">Utwórz i pobierz kopię teraz</button>
   </form>
@@ -1058,7 +1091,7 @@ def admin_backup():
     <div class="text-muted">Brak zapisanych kopii.</div>
   {% endif %}
 </div>
-""", files=files)
+""", files=files, db_path=db_path, users=users, projects=projects, entries=entries)
     return layout("Kopie zapasowe", body)
 
 @app.route("/admin/backup/create", methods=["POST"])
@@ -1108,7 +1141,11 @@ def admin_backup_restore():
     try:
         mem = io.BytesIO(f.read())
         _replace_db_from_zipfileobj(mem)
-        flash("Przywrócono bazę z załączonego pliku.")
+        # Statystyki po przywróceniu – żeby było widać, że dane są
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+        flash(f"Przywrócono bazę z załączonego pliku. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -1125,54 +1162,62 @@ def admin_backup_restore_saved(fname):
     try:
         with open(path, "rb") as fp:
             _replace_db_from_zipfileobj(fp)
-        flash(f"Przywrócono bazę z {fname}.")
+        # Statystyki po przywróceniu – żeby było widać, że dane są
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+        flash(f"Przywrócono bazę z {fname}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
 
 
 # --- Reports (with Excel export) ---
+
+
 @app.route("/admin/reports", methods=["GET"])
 @login_required
+
 def admin_reports():
     require_admin()
     d_from = request.args.get("from")
     d_to = request.args.get("to")
     user_id = request.args.get("user_id")
     project_id = request.args.get("project_id")
+
+    q = Entry.query.join(User).join(Project)
+    if d_from:
+        q = q.filter(Entry.work_date >= d_from)
+    if d_to:
+        q = q.filter(Entry.work_date <= d_to)
+    if user_id and user_id != "all":
+        q = q.filter(Entry.user_id == int(user_id))
+    if project_id and project_id != "all":
+        q = q.filter(Entry.project_id == int(project_id))
+
+    rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
     users = User.query.order_by(User.name).all()
     projects = Project.query.order_by(Project.name).all()
-    rows = []
-    if d_from and d_to:
-        d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
-        d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
-        q = Entry.query.join(User).join(Project).filter(
-            Entry.work_date >= d_from_dt,
-            Entry.work_date <= d_to_dt
-        )
-        if user_id and user_id != "all":
-            q = q.filter(Entry.user_id == int(user_id))
-        if project_id and project_id != "all":
-            q = q.filter(Entry.project_id == int(project_id))
-        rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
+
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Raport</h5>
+
   <form class="row g-2 mb-3" method="get">
     <div class="col-md-3">
       <label class="form-label">Od</label>
-      <input class="form-control" type="date" name="from" value="{{ request.args.get('from','') }}" required>
+      <input class="form-control" type="date" name="from" value="{{ request.args.get('from','') }}">
     </div>
     <div class="col-md-3">
       <label class="form-label">Do</label>
-      <input class="form-control" type="date" name="to" value="{{ request.args.get('to','') }}" required>
+      <input class="form-control" type="date" name="to" value="{{ request.args.get('to','') }}">
     </div>
     <div class="col-md-3">
       <label class="form-label">Pracownik</label>
       <select class="form-select" name="user_id">
         <option value="all">Wszyscy</option>
         {% for u in users %}
-          <option value="{{ u.id }}" {% if request.args.get('user_id')|int == u.id %}selected{% endif %}>{{ u.name }}</option>
+          <option value="{{ u.id }}" {% if request.args.get('user_id', type=int) == u.id %}selected{% endif %}>{{ u.name }}</option>
         {% endfor %}
       </select>
     </div>
@@ -1181,43 +1226,53 @@ def admin_reports():
       <select class="form-select" name="project_id">
         <option value="all">Wszystkie</option>
         {% for p in projects %}
-          <option value="{{ p.id }}" {% if request.args.get('project_id')|int == p.id %}selected{% endif %}>{{ p.name }}</option>
+          <option value="{{ p.id }}" {% if request.args.get('project_id', type=int) == p.id %}selected{% endif %}>{{ p.name }}</option>
         {% endfor %}
       </select>
     </div>
     <div class="col-12 d-flex gap-2">
       <button class="btn btn-primary">Pokaż</button>
-      {% if rows %}
-        <a class="btn btn-success" href="{{ url_for('admin_reports_export', from=request.args.get('from'), to=request.args.get('to'), user_id=request.args.get('user_id','all'), project_id=request.args.get('project_id','all')) }}">Eksport do Excel</a>
-      {% endif %}
     </div>
   </form>
+
+  <p class="small text-muted">Łącznie rekordów: {{ rows|length }}</p>
+
   {% if rows %}
-  <div class="table-responsive">
-    <table class="table table-sm align-middle">
-      <thead><tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Godziny</th><th>Extra</th><th>OT</th><th>Notatka</th></tr></thead>
-      <tbody>
-      {% for it in rows %}
-        <tr>
-          <td>{{ it.work_date.isoformat() }}</td>
-          <td>{{ it.user.name }}</td>
-          <td>{{ it.project.name }}</td>
-          <td>{{ fmt(it.minutes) }}</td>
-          <td>{% if it.is_extra %}✔{% else %}-{% endif %}</td>
-          <td>{% if it.is_overtime %}✔{% else %}-{% endif %}</td>
-          <td>{{ it.note or '' }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Pracownik</th>
+            <th>Projekt</th>
+            <th>Godziny</th>
+            <th>Extra</th>
+            <th>Nadgodziny</th>
+            <th>Notatka</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for entry in rows %}
+          <tr>
+            <td>{{ entry.work_date }}</td>
+            <td>{{ entry.user.name }}</td>
+            <td>{{ entry.project.name }}</td>
+            <td>{{ fmt(entry.minutes) }}</td>
+            <td>{% if entry.is_extra %}tak{% else %}-{% endif %}</td>
+            <td>{% if entry.is_overtime %}tak{% else %}-{% endif %}</td>
+            <td>{{ entry.note }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="text-muted">Brak wpisów.</div>
   {% endif %}
 </div>
-""", rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
+    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
     return layout("Raport", body)
 
-@app.route("/admin/reports/export")
-@login_required
 def admin_reports_export():
     require_admin()
     try:
