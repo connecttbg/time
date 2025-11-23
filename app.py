@@ -5,6 +5,8 @@ import zipfile
 import tempfile
 import errno
 import shutil
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, date, timedelta
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
@@ -1067,6 +1069,9 @@ def admin_backup():
   <form class="d-inline ms-2" method="post" action="{{ url_for('admin_backup_create_save') }}">
     <button class="btn btn-outline-primary">Zapisz kopię na dysku serwera</button>
   </form>
+  <form class="d-inline ms-2" method="post" action="{{ url_for('admin_backup_email') }}">
+    <button class="btn btn-outline-success">Wyślij kopię zapasową na e-mail</button>
+  </form>
   <hr class="my-3">
   <h6>Przywracanie z pliku (.zip)</h6>
   <form method="post" action="{{ url_for('admin_backup_restore') }}" enctype="multipart/form-data" onsubmit="return confirm('Zastąpić bieżącą bazę?')">
@@ -1117,6 +1122,50 @@ def admin_backup_create_save():
             ensure_db_file()
         z.write(DB_FILE, arcname="app.db")
     flash(f"Zapisano: {os.path.basename(zip_path)}")
+    return redirect(url_for("admin_backup"))
+
+
+
+@app.route("/admin/backup/email", methods=["POST"])
+@login_required
+def admin_backup_email():
+    require_admin()
+    # Konfiguracja SMTP z zmiennych środowiskowych
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    backup_to = os.environ.get("BACKUP_EMAIL_TO")
+    backup_from = os.environ.get("BACKUP_EMAIL_FROM") or smtp_user
+
+    if not (smtp_host and smtp_port and smtp_user and smtp_password and backup_to):
+        flash("Brak konfiguracji SMTP lub adresu docelowego BACKUP_EMAIL_TO.", "danger")
+        return redirect(url_for("admin_backup"))
+
+    # Przygotowanie danych kopii zapasowej w pamięci
+    data = _make_zip_bytes(DB_FILE)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"app_backup_{ts}.zip"
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Kopia zapasowa EKKO NOR – {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+    msg["From"] = backup_from
+    msg["To"] = backup_to
+    msg.set_content(
+        "Kopia zapasowa bazy danych aplikacji EKKO NOR.\n"
+        "Ta wiadomość została wygenerowana automatycznie przez system."
+    )
+    msg.add_attachment(data, maintype="application", subtype="zip", filename=fname)
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        flash(f"Wysłano kopię zapasową na adres: {backup_to}", "success")
+    except Exception as e:
+        flash(f"Nie udało się wysłać kopii zapasowej: {e}", "danger")
+
     return redirect(url_for("admin_backup"))
 
 @app.route("/admin/backup/download/<path:fname>")
@@ -1172,37 +1221,24 @@ def admin_backup_restore_saved(fname):
     return redirect(url_for("admin_backup"))
 
 
-
 # --- Reports (with Excel export) ---
 
 
 @app.route("/admin/reports", methods=["GET"])
 @login_required
+
 def admin_reports():
     require_admin()
-
     d_from = request.args.get("from")
     d_to = request.args.get("to")
     user_id = request.args.get("user_id")
     project_id = request.args.get("project_id")
 
     q = Entry.query.join(User).join(Project)
-
-    # filtrowanie po datach (jeśli podane)
     if d_from:
-        try:
-            d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
-            q = q.filter(Entry.work_date >= d_from_dt)
-        except ValueError:
-            flash("Nieprawidłowa data 'od'.", "danger")
+        q = q.filter(Entry.work_date >= d_from)
     if d_to:
-        try:
-            d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
-            q = q.filter(Entry.work_date <= d_to_dt)
-        except ValueError:
-            flash("Nieprawidłowa data 'do'.", "danger")
-
-    # filtrowanie po pracowniku / projekcie
+        q = q.filter(Entry.work_date <= d_to)
     if user_id and user_id != "all":
         q = q.filter(Entry.user_id == int(user_id))
     if project_id and project_id != "all":
@@ -1230,7 +1266,7 @@ def admin_reports():
       <select class="form-select" name="user_id">
         <option value="all">Wszyscy</option>
         {% for u in users %}
-          <option value="{{ u.id }}" {% if request.args.get('user_id')|int == u.id %}selected{% endif %}>{{ u.name }}</option>
+          <option value="{{ u.id }}" {% if request.args.get('user_id', type=int) == u.id %}selected{% endif %}>{{ u.name }}</option>
         {% endfor %}
       </select>
     </div>
@@ -1239,22 +1275,12 @@ def admin_reports():
       <select class="form-select" name="project_id">
         <option value="all">Wszystkie</option>
         {% for p in projects %}
-          <option value="{{ p.id }}" {% if request.args.get('project_id')|int == p.id %}selected{% endif %}>{{ p.name }}</option>
+          <option value="{{ p.id }}" {% if request.args.get('project_id', type=int) == p.id %}selected{% endif %}>{{ p.name }}</option>
         {% endfor %}
       </select>
     </div>
     <div class="col-12 d-flex gap-2">
       <button class="btn btn-primary">Pokaż</button>
-      {% if rows %}
-        <a class="btn btn-success"
-           href="{{ url_for('admin_reports_export',
-                            from=request.args.get('from',''),
-                            to=request.args.get('to',''),
-                            user_id=request.args.get('user_id','all'),
-                            project_id=request.args.get('project_id','all')) }}">
-          Eksport do Excela
-        </a>
-      {% endif %}
     </div>
   </form>
 
@@ -1296,9 +1322,6 @@ def admin_reports():
     """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
     return layout("Raport", body)
 
-
-@app.route("/admin/reports/export", methods=["GET"])
-@login_required
 def admin_reports_export():
     require_admin()
     try:
@@ -1310,13 +1333,11 @@ def admin_reports_export():
     d_to = request.args.get("to")
     user_id = request.args.get("user_id", "all")
     project_id = request.args.get("project_id", "all")
-
     if not d_from or not d_to:
-        abort(400, "Podaj zakres dat (od / do).")
+        abort(400)
 
     d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
     d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
-
     q = Entry.query.join(User).join(Project).filter(
         Entry.work_date >= d_from_dt,
         Entry.work_date <= d_to_dt
@@ -1325,14 +1346,12 @@ def admin_reports_export():
         q = q.filter(Entry.user_id == int(user_id))
     if project_id != "all":
         q = q.filter(Entry.project_id == int(project_id))
-
     rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Raport"
     ws.append(["Data", "Pracownik", "Projekt", "Godziny (HH:MM)", "Extra", "Nadgodziny", "Notatka"])
-
     for it in rows:
         ws.append([
             it.work_date.isoformat(),
@@ -1344,7 +1363,8 @@ def admin_reports_export():
             it.note or ""
         ])
 
-    total_min = sum((r.minutes or 0) for r in rows)
+    # podsumowanie
+    total_min = sum(r.minutes for r in rows)
     ws.append([])
     ws.append(["Razem", "", "", fmt_hhmm(total_min), "", "", ""])
 
@@ -1352,12 +1372,7 @@ def admin_reports_export():
     wb.save(buf)
     buf.seek(0)
     fname = f"raport_{d_from}_{d_to}.xlsx"
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name=fname,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    return send_file(buf, as_attachment=True, download_name=fname, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 if __name__ == "__main__":
