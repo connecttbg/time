@@ -510,36 +510,35 @@ def admin_overview():
     m_from = date(year, month, 1)
     m_to = (m_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
 
-    total = db.session.query(db.func.sum(Entry.minutes)).filter(Entry.work_date>=m_from, Entry.work_date<=m_to).scalar() or 0
-
-    # Poprzedni miesiąc
+    # poprzedni miesiąc
     if month == 1:
-        prev_year = year - 1
-        prev_month = 12
+        prev_year, prev_month = year - 1, 12
     else:
-        prev_year = year
-        prev_month = month - 1
+        prev_year, prev_month = year, month - 1
     prev_from = date(prev_year, prev_month, 1)
     prev_to = (prev_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    prev_ym = f"{prev_year:04d}-{prev_month:02d}"
 
-    # Zestawienie godzin per pracownik (aktywni)
+    total = db.session.query(db.func.sum(Entry.minutes)).filter(
+        Entry.work_date >= m_from, Entry.work_date <= m_to
+    ).scalar() or 0
+
     users = User.query.filter_by(is_active_u=True).order_by(User.name).all()
     stats = []
     for u in users:
-        cur_min = db.session.query(db.func.sum(Entry.minutes)).filter(
+        curr_min = db.session.query(db.func.sum(Entry.minutes)).filter(
             Entry.user_id == u.id,
             Entry.work_date >= m_from,
-            Entry.work_date <= m_to
+            Entry.work_date <= m_to,
         ).scalar() or 0
         prev_min = db.session.query(db.func.sum(Entry.minutes)).filter(
             Entry.user_id == u.id,
             Entry.work_date >= prev_from,
-            Entry.work_date <= prev_to
+            Entry.work_date <= prev_to,
         ).scalar() or 0
-        stats.append({"user": u, "cur": cur_min, "prev": prev_min})
+        stats.append({"user": u, "curr": curr_min, "prev": prev_min})
 
-    body = render_template_string("""<div class="card p-3">
+    body = render_template_string("""
+<div class="card p-3 mb-3">
   <h5 class="mb-3">Podsumowanie miesiąca</h5>
   <form class="row g-2 mb-3" method="get">
     <div class="col-md-3">
@@ -552,23 +551,28 @@ def admin_overview():
   </form>
   <div class="display-6">{{ fmt(total) }}</div>
   <div class="text-muted">Łącznie zapisanych godzin w wybranym miesiącu</div>
+</div>
 
-  <hr class="my-3">
-  <h6 class="mb-2">Godziny według pracowników</h6>
+<div class="card p-3">
+  <h5 class="mb-3">Godziny pracowników</h5>
+  <p class="small text-muted">
+    Bieżący miesiąc: {{ ym }} &nbsp;&nbsp;|&nbsp;&nbsp;
+    Poprzedni miesiąc: {{ prev_label }}
+  </p>
   <div class="table-responsive">
     <table class="table table-sm table-striped align-middle">
       <thead>
         <tr>
           <th>Pracownik</th>
-          <th>{{ ym }}</th>
-          <th>{{ prev_ym }}</th>
+          <th>Godziny w tym miesiącu</th>
+          <th>Godziny w poprzednim miesiącu</th>
         </tr>
       </thead>
       <tbody>
       {% for row in stats %}
         <tr>
           <td>{{ row.user.name }}</td>
-          <td>{{ fmt(row.cur) }}</td>
+          <td>{{ fmt(row.curr) }}</td>
           <td>{{ fmt(row.prev) }}</td>
         </tr>
       {% endfor %}
@@ -576,8 +580,9 @@ def admin_overview():
     </table>
   </div>
 </div>
-""", ym=ym, prev_ym=prev_ym, total=total, stats=stats, fmt=fmt_hhmm)
-    return layout("Admin – Podsumowanie", body)
+""", ym=ym, total=total, stats=stats, fmt=fmt_hhmm,
+       prev_label=f"{prev_year:04d}-{prev_month:02d}")
+    return layout("Admin", body)
 
 
 # --- Admin: users ---
@@ -1337,13 +1342,16 @@ def admin_reports():
   <p class="small text-muted">Łącznie rekordów: {{ rows|length }}</p>
 
   {% if rows %}
-    <div class="mb-2">
+    <div class="mb-2 d-flex gap-2">
       <a class="btn btn-outline-success btn-sm"
          href="{{ url_for('admin_reports_export') }}?from={{ request.args.get('from','') }}&to={{ request.args.get('to','') }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
-        Eksport do Excela
+        Eksport prosty (Excel)
+      </a>
+      <a class="btn btn-outline-primary btn-sm"
+         href="{{ url_for('admin_reports_payroll') }}?from={{ request.args.get('from','') }}&to={{ request.args.get('to','') }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
+        Lista płac (Excel)
       </a>
     </div>
-
     <div class="table-responsive">
       <table class="table table-sm table-striped align-middle">
         <thead>
@@ -1372,7 +1380,9 @@ def admin_reports():
         </tbody>
       </table>
     </div>
-    <p class="mt-2 fw-semibold">Suma godzin: {{ fmt(total_minutes) }}</p>
+    <div class="mt-2 fw-bold">
+      Suma godzin: {{ fmt(total_minutes) }}
+    </div>
   {% else %}
     <div class="text-muted">Brak wpisów.</div>
   {% endif %}
@@ -1433,6 +1443,95 @@ def admin_reports_export():
     buf.seek(0)
     fname = f"raport_{d_from}_{d_to}.xlsx"
     return send_file(buf, as_attachment=True, download_name=fname, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+@app.route("/admin/reports/payroll", methods=["GET"])
+@login_required
+def admin_reports_payroll():
+    require_admin()
+    try:
+        from openpyxl import Workbook
+    except Exception:
+        abort(500, "Brak pakietu openpyxl (sprawdź requirements.txt)")
+
+    d_from = request.args.get("from")
+    d_to = request.args.get("to")
+    user_id = request.args.get("user_id", "all")
+    project_id = request.args.get("project_id", "all")
+    if not d_from or not d_to:
+        abort(400)
+
+    d_from_dt = datetime.strptime(d_from, "%Y-%m-%d").date()
+    d_to_dt = datetime.strptime(d_to, "%Y-%m-%d").date()
+
+    q = Entry.query.join(User).join(Project).filter(
+        Entry.work_date >= d_from_dt,
+        Entry.work_date <= d_to_dt
+    )
+    if user_id != "all":
+        q = q.filter(Entry.user_id == int(user_id))
+    if project_id != "all":
+        q = q.filter(Entry.project_id == int(project_id))
+
+    rows = q.order_by(User.name.asc(), Entry.work_date.asc(), Entry.id.asc()).all()
+
+    from collections import defaultdict
+    per_user = defaultdict(list)
+    for e in rows:
+        per_user[e.user].append(e)
+
+    wb = Workbook()
+    # usuń domyślny arkusz, jeśli istnieje
+    default_ws = wb.active
+    wb.remove(default_ws)
+
+    def sheet_title(user):
+        base = user.name or f"Uzytkownik_{user.id}"
+        for ch in '[]:*?/\\':
+            base = base.replace(ch, "_")
+        if len(base) > 25:
+            base = base[:25]
+        return base
+
+    for user, entries in per_user.items():
+        ws = wb.create_sheet(title=sheet_title(user))
+        ws.append([f"Lista płac – {user.name}"])
+        ws.append([f"Okres: {d_from_dt.isoformat()} – {d_to_dt.isoformat()}"])
+        ws.append([])
+        ws.append(["Data", "Projekt", "Godziny (HH:MM)", "Extra", "Nadgodziny", "Notatka"])
+
+        total_minutes = 0
+        extra_minutes = 0
+        overtime_minutes = 0
+
+        for e in entries:
+            ws.append([
+                e.work_date.isoformat(),
+                e.project.name,
+                fmt_hhmm(e.minutes),
+                "TAK" if e.is_extra else "",
+                "TAK" if e.is_overtime else "",
+                e.note or "",
+            ])
+            total_minutes += e.minutes
+            if e.is_extra:
+                extra_minutes += e.minutes
+            if e.is_overtime:
+                overtime_minutes += e.minutes
+
+        ws.append([])
+        ws.append(["Suma godzin", "", fmt_hhmm(total_minutes), "", "", ""])
+        ws.append(["Suma extra", "", fmt_hhmm(extra_minutes), "", "", ""])
+        ws.append(["Suma nadgodzin", "", fmt_hhmm(overtime_minutes), "", "", ""])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"lista_plac_{d_from_dt}_{d_to_dt}.xlsx"
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=fname,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 if __name__ == "__main__":
