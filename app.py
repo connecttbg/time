@@ -512,8 +512,34 @@ def admin_overview():
 
     total = db.session.query(db.func.sum(Entry.minutes)).filter(Entry.work_date>=m_from, Entry.work_date<=m_to).scalar() or 0
 
-    body = render_template_string("""
-<div class="card p-3">
+    # Poprzedni miesiąc
+    if month == 1:
+        prev_year = year - 1
+        prev_month = 12
+    else:
+        prev_year = year
+        prev_month = month - 1
+    prev_from = date(prev_year, prev_month, 1)
+    prev_to = (prev_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    prev_ym = f"{prev_year:04d}-{prev_month:02d}"
+
+    # Zestawienie godzin per pracownik (aktywni)
+    users = User.query.filter_by(is_active_u=True).order_by(User.name).all()
+    stats = []
+    for u in users:
+        cur_min = db.session.query(db.func.sum(Entry.minutes)).filter(
+            Entry.user_id == u.id,
+            Entry.work_date >= m_from,
+            Entry.work_date <= m_to
+        ).scalar() or 0
+        prev_min = db.session.query(db.func.sum(Entry.minutes)).filter(
+            Entry.user_id == u.id,
+            Entry.work_date >= prev_from,
+            Entry.work_date <= prev_to
+        ).scalar() or 0
+        stats.append({"user": u, "cur": cur_min, "prev": prev_min})
+
+    body = render_template_string("""<div class="card p-3">
   <h5 class="mb-3">Podsumowanie miesiąca</h5>
   <form class="row g-2 mb-3" method="get">
     <div class="col-md-3">
@@ -526,8 +552,31 @@ def admin_overview():
   </form>
   <div class="display-6">{{ fmt(total) }}</div>
   <div class="text-muted">Łącznie zapisanych godzin w wybranym miesiącu</div>
+
+  <hr class="my-3">
+  <h6 class="mb-2">Godziny według pracowników</h6>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle">
+      <thead>
+        <tr>
+          <th>Pracownik</th>
+          <th>{{ ym }}</th>
+          <th>{{ prev_ym }}</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in stats %}
+        <tr>
+          <td>{{ row.user.name }}</td>
+          <td>{{ fmt(row.cur) }}</td>
+          <td>{{ fmt(row.prev) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
-""", ym=ym, total=total, fmt=fmt_hhmm)
+""", ym=ym, prev_ym=prev_ym, total=total, stats=stats, fmt=fmt_hhmm)
     return layout("Admin – Podsumowanie", body)
 
 
@@ -1245,6 +1294,7 @@ def admin_reports():
         q = q.filter(Entry.project_id == int(project_id))
 
     rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
+    total_minutes = sum(e.minutes for e in rows)
     users = User.query.order_by(User.name).all()
     projects = Project.query.order_by(Project.name).all()
 
@@ -1266,7 +1316,7 @@ def admin_reports():
       <select class="form-select" name="user_id">
         <option value="all">Wszyscy</option>
         {% for u in users %}
-          <option value="{{ u.id }}" {% if request.args.get('user_id', type=int) == u.id %}selected{% endif %}>{{ u.name }}</option>
+          <option value="{{ u.id }}" {% if request.args.get('user_id')|int == u.id %}selected{% endif %}>{{ u.name }}</option>
         {% endfor %}
       </select>
     </div>
@@ -1275,7 +1325,7 @@ def admin_reports():
       <select class="form-select" name="project_id">
         <option value="all">Wszystkie</option>
         {% for p in projects %}
-          <option value="{{ p.id }}" {% if request.args.get('project_id', type=int) == p.id %}selected{% endif %}>{{ p.name }}</option>
+          <option value="{{ p.id }}" {% if request.args.get('project_id')|int == p.id %}selected{% endif %}>{{ p.name }}</option>
         {% endfor %}
       </select>
     </div>
@@ -1287,6 +1337,13 @@ def admin_reports():
   <p class="small text-muted">Łącznie rekordów: {{ rows|length }}</p>
 
   {% if rows %}
+    <div class="mb-2">
+      <a class="btn btn-outline-success btn-sm"
+         href="{{ url_for('admin_reports_export') }}?from={{ request.args.get('from','') }}&to={{ request.args.get('to','') }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
+        Eksport do Excela
+      </a>
+    </div>
+
     <div class="table-responsive">
       <table class="table table-sm table-striped align-middle">
         <thead>
@@ -1315,13 +1372,16 @@ def admin_reports():
         </tbody>
       </table>
     </div>
+    <p class="mt-2 fw-semibold">Suma godzin: {{ fmt(total_minutes) }}</p>
   {% else %}
     <div class="text-muted">Brak wpisów.</div>
   {% endif %}
 </div>
-    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm)
+    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm, total_minutes=total_minutes)
     return layout("Raport", body)
 
+@app.route("/admin/reports/export", methods=["GET"])
+@login_required
 def admin_reports_export():
     require_admin()
     try:
