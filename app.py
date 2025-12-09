@@ -71,6 +71,18 @@ class Entry(db.Model):
     project = db.relationship("Project", backref="entries")
 
 
+class Cost(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    cost_date = db.Column(db.Date, nullable=False)
+    amount = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="costs")
+
+
+
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
@@ -195,10 +207,12 @@ BASE = """
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_users') }}">Pracownicy</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_projects') }}">Projekty</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_entries') }}">Godziny (admin)</a>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_costs') }}">Koszty (admin)</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_reports') }}">Raport</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_backup') }}">Kopie</a>
       {% endif %}
-      <span class="badge badge-soft px-3 py-2">{{ current_user.name }}</span>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('user_costs') }}">Koszty</a>
+      <a class="badge badge-soft px-3 py-2 text-decoration-none" href="{{ url_for('user_summary') }}">{{ current_user.name }}</a>
       <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
     </div>
     {% endif %}
@@ -1532,6 +1546,446 @@ def admin_reports_payroll():
         download_name=fname,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+# --- User: podsumowanie godzin (bieżący i poprzedni miesiąc) ---
+@app.route("/my-summary")
+@login_required
+def user_summary():
+    today = date.today()
+    # bieżący miesiąc
+    cur_first, cur_last = month_bounds(today)
+    # poprzedni miesiąc – weź dzień przed pierwszym dniem bieżącego
+    prev_ref = cur_first - timedelta(days=1)
+    prev_first, prev_last = month_bounds(prev_ref)
+
+    cur_entries = (
+        Entry.query
+        .filter(
+            Entry.user_id == current_user.id,
+            Entry.work_date >= cur_first,
+            Entry.work_date <= cur_last,
+        )
+        .order_by(Entry.work_date.asc(), Entry.id.asc())
+        .all()
+    )
+    prev_entries = (
+        Entry.query
+        .filter(
+            Entry.user_id == current_user.id,
+            Entry.work_date >= prev_first,
+            Entry.work_date <= prev_last,
+        )
+        .order_by(Entry.work_date.asc(), Entry.id.asc())
+        .all()
+    )
+
+    cur_total = sum((e.minutes or 0) for e in cur_entries)
+    prev_total = sum((e.minutes or 0) for e in prev_entries)
+
+    cur_label = cur_first.strftime("%Y-%m")
+    prev_label = prev_first.strftime("%Y-%m")
+
+    body = render_template_string("""
+<div class="row">
+  <div class="col-md-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Moje godziny – {{ current_user.name }}</h5>
+      <p class="text-muted small mb-3">
+        Zestawienie czasu pracy za bieżący ({{ cur_label }}) i poprzedni ({{ prev_label }}) miesiąc.
+      </p>
+      <div class="row">
+        <div class="col-md-6">
+          <h6>Aktualny miesiąc ({{ cur_label }})</h6>
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Projekt</th>
+                <th>Notatka</th>
+                <th>Czas</th>
+                <th>Extra</th>
+                <th>OT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in cur_entries %}
+              <tr>
+                <td>{{ e.work_date.isoformat() }}</td>
+                <td>{{ e.project.name }}</td>
+                <td>{{ e.note or '' }}</td>
+                <td>{{ fmt(e.minutes) }}</td>
+                <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
+                <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="6" class="text-muted">Brak wpisów w tym miesiącu.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div class="mt-2 fw-bold">Suma: {{ fmt(cur_total) }}</div>
+        </div>
+        <div class="col-md-6">
+          <h6>Poprzedni miesiąc ({{ prev_label }})</h6>
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Projekt</th>
+                <th>Notatka</th>
+                <th>Czas</th>
+                <th>Extra</th>
+                <th>OT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in prev_entries %}
+              <tr>
+                <td>{{ e.work_date.isoformat() }}</td>
+                <td>{{ e.project.name }}</td>
+                <td>{{ e.note or '' }}</td>
+                <td>{{ fmt(e.minutes) }}</td>
+                <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
+                <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="6" class="text-muted">Brak wpisów w poprzednim miesiącu.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div class="mt-2 fw-bold">Suma: {{ fmt(prev_total) }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+""", cur_entries=cur_entries, prev_entries=prev_entries, fmt=fmt_hhmm,
+       cur_total=cur_total, prev_total=prev_total,
+       cur_label=cur_label, prev_label=prev_label, date=date)
+    return layout("Moje godziny", body)
+
+
+# --- User: koszty ---
+@app.route("/costs", methods=["GET", "POST"])
+@login_required
+def user_costs():
+    if request.method == "POST":
+        cost_date_str = request.form.get("cost_date")
+        amount = (request.form.get("amount") or "").strip()
+        description = request.form.get("description") or ""
+
+        try:
+            cost_date = datetime.strptime(cost_date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            flash("Nieprawidłowa data kosztu.")
+            return redirect(url_for("user_costs"))
+
+        if not amount:
+            flash("Podaj kwotę kosztu.")
+            return redirect(url_for("user_costs"))
+
+        db.session.add(Cost(
+            user_id=current_user.id,
+            cost_date=cost_date,
+            amount=amount,
+            description=description,
+        ))
+        db.session.commit()
+        flash("Dodano koszt.")
+        return redirect(url_for("user_costs"))
+
+    today = date.today()
+    cur_first, cur_last = month_bounds(today)
+    prev_ref = cur_first - timedelta(days=1)
+    prev_first, prev_last = month_bounds(prev_ref)
+
+    current_costs = (
+        Cost.query
+        .filter(
+            Cost.user_id == current_user.id,
+            Cost.cost_date >= cur_first,
+            Cost.cost_date <= cur_last,
+        )
+        .order_by(Cost.cost_date.asc(), Cost.id.asc())
+        .all()
+    )
+    previous_costs = (
+        Cost.query
+        .filter(
+            Cost.user_id == current_user.id,
+            Cost.cost_date >= prev_first,
+            Cost.cost_date <= prev_last,
+        )
+        .order_by(Cost.cost_date.asc(), Cost.id.asc())
+        .all()
+    )
+
+    cur_label = cur_first.strftime("%Y-%m")
+    prev_label = prev_first.strftime("%Y-%m")
+
+    body = render_template_string("""
+<div class="row">
+  <div class="col-md-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Moje koszty – {{ current_user.name }}</h5>
+      <form class="row g-2 mb-3" method="post">
+        <div class="col-md-3">
+          <label class="form-label">Data kosztu</label>
+          <input class="form-control" type="date" name="cost_date" value="{{ date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Kwota</label>
+          <input class="form-control" type="text" name="amount" placeholder="np. 1234,50" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Opis</label>
+          <input class="form-control" type="text" name="description" placeholder="np. paliwo, narzędzia">
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+          <button class="btn btn-primary w-100">Dodaj koszt</button>
+        </div>
+      </form>
+
+      <div class="row">
+        <div class="col-md-6">
+          <h6>Aktualny miesiąc ({{ cur_label }})</h6>
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Kwota</th>
+                <th>Opis</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in current_costs %}
+              <tr>
+                <td>{{ c.cost_date.isoformat() }}</td>
+                <td>{{ c.amount }}</td>
+                <td>{{ c.description or '' }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="3" class="text-muted">Brak kosztów w tym miesiącu.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="col-md-6">
+          <h6>Poprzedni miesiąc ({{ prev_label }})</h6>
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Kwota</th>
+                <th>Opis</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in previous_costs %}
+              <tr>
+                <td>{{ c.cost_date.isoformat() }}</td>
+                <td>{{ c.amount }}</td>
+                <td>{{ c.description or '' }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="3" class="text-muted">Brak kosztów w poprzednim miesiącu.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="small text-muted mt-2 mb-0">
+        Po zapisaniu kosztu nie możesz go już edytować – w razie potrzeby skontaktuj się z administratorem.
+      </p>
+    </div>
+  </div>
+</div>
+""", current_costs=current_costs, previous_costs=previous_costs,
+       cur_label=cur_label, prev_label=prev_label, date=date)
+    return layout("Moje koszty", body)
+
+
+# --- Admin: koszty wszystkich użytkowników ---
+@app.route("/admin/costs", methods=["GET", "POST"])
+@login_required
+def admin_costs():
+    require_admin()
+
+    if request.method == "POST":
+        user_id = int(request.form.get("user_id"))
+        cost_date_str = request.form.get("cost_date")
+        amount = (request.form.get("amount") or "").strip()
+        description = request.form.get("description") or ""
+
+        try:
+            cost_date = datetime.strptime(cost_date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            flash("Nieprawidłowa data kosztu.")
+            return redirect(url_for("admin_costs"))
+
+        if not amount:
+            flash("Podaj kwotę kosztu.")
+            return redirect(url_for("admin_costs"))
+
+        db.session.add(Cost(
+            user_id=user_id,
+            cost_date=cost_date,
+            amount=amount,
+            description=description,
+        ))
+        db.session.commit()
+        flash("Dodano koszt.")
+        return redirect(url_for("admin_costs"))
+
+    users = _all_users_ordered()
+    costs = (
+        Cost.query
+        .join(User)
+        .order_by(Cost.cost_date.desc(), Cost.id.desc())
+        .all()
+    )
+
+    body = render_template_string("""
+<div class="row">
+  <div class="col-md-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Koszty – wszyscy użytkownicy</h5>
+      <form class="row g-2 mb-3" method="post">
+        <div class="col-md-3">
+          <label class="form-label">Pracownik</label>
+          <select class="form-select" name="user_id" required>
+            {% for u in users %}
+              <option value="{{ u.id }}">{{ u.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Data kosztu</label>
+          <input class="form-control" type="date" name="cost_date" value="{{ date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Kwota</label>
+          <input class="form-control" type="text" name="amount" placeholder="np. 1234,50" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Opis</label>
+          <input class="form-control" type="text" name="description" placeholder="np. paliwo, narzędzia">
+        </div>
+        <div class="col-md-12 d-flex justify-content-end mt-2">
+          <button class="btn btn-primary">Dodaj koszt</button>
+        </div>
+      </form>
+
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Pracownik</th>
+              <th>Kwota</th>
+              <th>Opis</th>
+              <th class="text-end">Akcje</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in costs %}
+            <tr>
+              <td>{{ c.cost_date.isoformat() }}</td>
+              <td>{{ c.user.name }}</td>
+              <td>{{ c.amount }}</td>
+              <td>{{ c.description or '' }}</td>
+              <td class="text-end">
+                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_cost_edit', cost_id=c.id) }}">Edytuj</a>
+                <form class="d-inline" method="post" action="{{ url_for('admin_cost_delete', cost_id=c.id) }}" onsubmit="return confirm('Na pewno usunąć ten koszt?');">
+                  <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                </form>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="text-muted">Brak kosztów.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+""", users=users, costs=costs, date=date)
+    return layout("Koszty (admin)", body)
+
+
+@app.route("/admin/costs/<int:cost_id>/edit", methods=["GET", "POST"])
+@login_required
+def admin_cost_edit(cost_id):
+    require_admin()
+    cost = Cost.query.get_or_404(cost_id)
+    users = _all_users_ordered()
+
+    if request.method == "POST":
+        cost.user_id = int(request.form.get("user_id"))
+        cost_date_str = request.form.get("cost_date")
+        cost.amount = (request.form.get("amount") or "").strip()
+        cost.description = request.form.get("description") or ""
+
+        try:
+            cost.cost_date = datetime.strptime(cost_date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            flash("Nieprawidłowa data kosztu.")
+            return redirect(url_for("admin_cost_edit", cost_id=cost.id))
+
+        if not cost.amount:
+            flash("Podaj kwotę kosztu.")
+            return redirect(url_for("admin_cost_edit", cost_id=cost.id))
+
+        db.session.commit()
+        flash("Zapisano zmiany.")
+        return redirect(url_for("admin_costs"))
+
+    body = render_template_string("""
+<div class="row justify-content-center">
+  <div class="col-md-6">
+    <div class="card p-3">
+      <h5 class="mb-3">Edytuj koszt</h5>
+      <form class="row g-2" method="post">
+        <div class="col-md-6">
+          <label class="form-label">Pracownik</label>
+          <select class="form-select" name="user_id" required>
+            {% for u in users %}
+              <option value="{{ u.id }}" {% if u.id == cost.user_id %}selected{% endif %}>{{ u.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Data kosztu</label>
+          <input class="form-control" type="date" name="cost_date" value="{{ cost.cost_date.isoformat() }}" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Kwota</label>
+          <input class="form-control" type="text" name="amount" value="{{ cost.amount }}" required>
+        </div>
+        <div class="col-md-12">
+          <label class="form-label">Opis</label>
+          <input class="form-control" type="text" name="description" value="{{ cost.description or '' }}">
+        </div>
+        <div class="col-md-12 d-flex justify-content-end">
+          <button class="btn btn-primary">Zapisz</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+""", users=users, cost=cost)
+    return layout("Edytuj koszt", body)
+
+
+@app.route("/admin/costs/<int:cost_id>/delete", methods=["POST"])
+@login_required
+def admin_cost_delete(cost_id):
+    require_admin()
+    cost = Cost.query.get_or_404(cost_id)
+    db.session.delete(cost)
+    db.session.commit()
+    flash("Usunięto koszt.")
+    return redirect(url_for("admin_costs"))
+
 
 
 if __name__ == "__main__":
