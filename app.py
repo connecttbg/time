@@ -2307,8 +2307,50 @@ def leaves():
         flash("Dodano prośbę o urlop (szkic).")
         return redirect(url_for("leaves"))
 
+
+    # Admin: dodaje urlop wybranemu użytkownikowi (od razu zaakceptowany)
+    if current_user.is_admin and request.method == "POST" and request.form.get("action") == "admin_add":
+        uid = request.form.get("user_id")
+        df = request.form.get("date_from")
+        dt = request.form.get("date_to")
+        reason = request.form.get("reason") or ""
+
+        try:
+            user_id = int(uid)
+            date_from = datetime.strptime(df, "%Y-%m-%d").date()
+            date_to = datetime.strptime(dt, "%Y-%m-%d").date()
+        except Exception:
+            flash("Nieprawidłowe dane formularza.", "danger")
+            return redirect(url_for("leaves"))
+
+        if date_to < date_from:
+            flash("Data 'Do' nie może być wcześniejsza niż 'Od'.", "danger")
+            return redirect(url_for("leaves"))
+
+        u = User.query.get(user_id)
+        if not u:
+            flash("Nie znaleziono użytkownika.", "danger")
+            return redirect(url_for("leaves"))
+
+        now = datetime.utcnow()
+        lr = LeaveRequest(
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            reason=reason,
+            status="APPROVED",
+            submitted_at=now,
+            decided_at=now,
+            decided_by=current_user.id,
+        )
+        db.session.add(lr)
+        db.session.commit()
+        flash("Urlop został dodany i zaakceptowany.", "success")
+        return redirect(url_for("leaves"))
+
     # Admin: lista wszystkich
     if current_user.is_admin:
+        users = User.query.order_by(User.name.asc(), User.id.asc()).all()
         rows = (
             LeaveRequest.query
             .join(User, LeaveRequest.user_id == User.id)
@@ -2325,6 +2367,29 @@ def leaves():
       <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('admin_leaves_print') }}">Druk</a>
     </div>
   </div>
+  <form method="post" class="row g-2 mb-3">
+    <input type="hidden" name="action" value="admin_add">
+    <div class="col-12 col-md-3">
+      <select class="form-select form-select-sm" name="user_id" required>
+        <option value="" disabled selected>Wybierz użytkownika</option>
+        {% for u in users %}
+          <option value="{{ u.id }}">{{ u.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-6 col-md-2">
+      <input class="form-control form-control-sm" type="date" name="date_from" required>
+    </div>
+    <div class="col-6 col-md-2">
+      <input class="form-control form-control-sm" type="date" name="date_to" required>
+    </div>
+    <div class="col-12 col-md-3">
+      <input class="form-control form-control-sm" type="text" name="reason" placeholder="Uzasadnienie (opcjonalnie)">
+    </div>
+    <div class="col-12 col-md-2 text-md-end">
+      <button class="btn btn-sm btn-primary" type="submit">Dodaj urlop</button>
+    </div>
+  </form>
   <div class="table-responsive">
     <table class="table table-sm align-middle">
       <thead>
@@ -2365,7 +2430,7 @@ def leaves():
     </table>
   </div>
 </div>
-""", rows=rows, status_pl=_leave_status_pl)
+""", rows=rows, users=users, status_pl=_leave_status_pl)
         return layout("Urlopy (admin)", body)
 
     # User: lista swoich
@@ -2481,7 +2546,7 @@ def admin_leaves_export_xlsx():
             (r.reason or "").strip(),
             (r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""),
             (r.submitted_at.strftime("%Y-%m-%d %H:%M") if getattr(r, "submitted_at", None) else ""),
-            (r.approved_at.strftime("%Y-%m-%d %H:%M") if getattr(r, "approved_at", None) else ""),
+            (r.decided_at.strftime("%Y-%m-%d %H:%M") if getattr(r, "decided_at", None) else ""),
         ])
 
     headers = ["Użytkownik", "Od", "Do", "Dni", "Status", "Uzasadnienie", "Utworzono", "Wysłano", "Zaakceptowano"]
