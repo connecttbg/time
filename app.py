@@ -82,6 +82,25 @@ class Cost(db.Model):
     user = db.relationship("User", backref="costs")
 
 
+class LeaveRequest(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+
+    date_from = db.Column(db.Date, nullable=False)
+    date_to = db.Column(db.Date, nullable=False)
+    reason = db.Column(db.Text, nullable=True)
+
+    # DRAFT -> SUBMITTED -> APPROVED
+    status = db.Column(db.String(20), nullable=False, default="DRAFT")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    submitted_at = db.Column(db.DateTime, nullable=True)
+    decided_at = db.Column(db.DateTime, nullable=True)
+    decided_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
+    user = db.relationship("User", foreign_keys=[user_id], backref="leave_requests")
+    decided_by_user = db.relationship("User", foreign_keys=[decided_by])
+
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -211,6 +230,7 @@ BASE = """
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_reports') }}">Raport</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_backup') }}">Kopie</a>
       {% endif %}
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('leaves') }}">Urlopy</a>
       <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('user_costs') }}">Koszty</a>
       <a class="badge badge-soft px-3 py-2 text-decoration-none" href="{{ url_for('user_summary') }}">{{ current_user.name }}</a>
       <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
@@ -1725,7 +1745,13 @@ def user_costs():
 <div class="row">
   <div class="col-md-12">
     <div class="card p-3">
-      <h5 class="mb-3">Moje koszty – {{ current_user.name }}</h5>
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Moje koszty – {{ current_user.name }}</h5>
+        <div class="text-end">
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('user_costs_export_xlsx') }}">Eksport Excel</a>
+          <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('user_costs_print') }}">Druk</a>
+        </div>
+      </div>
       <form class="row g-2 mb-3" method="post">
         <div class="col-md-3">
           <label class="form-label">Data kosztu</label>
@@ -1803,6 +1829,105 @@ def user_costs():
     return layout("Moje koszty", body)
 
 
+
+@app.route("/costs/export.xlsx")
+@login_required
+def user_costs_export_xlsx():
+    # eksport tylko swoich kosztów
+    costs = (
+        Cost.query.filter_by(user_id=current_user.id)
+        .order_by(Cost.cost_date.desc(), Cost.id.desc())
+        .all()
+    )
+
+    data_rows = []
+    for c in costs:
+        data_rows.append([
+            c.cost_date.isoformat(),
+            (c.amount or "").strip(),
+            (c.description or "").strip(),
+            (c.created_at.strftime("%Y-%m-%d %H:%M") if c.created_at else ""),
+        ])
+
+    headers = ["Data", "Kwota", "Opis", "Utworzono"]
+    bio_xlsx = _make_xlsx_bytes(headers, data_rows, sheet_name="Koszty")
+    filename = f"koszty_{current_user.name}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return send_file(
+        bio_xlsx,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/costs/print")
+@login_required
+def user_costs_print():
+    costs = (
+        Cost.query.filter_by(user_id=current_user.id)
+        .order_by(Cost.cost_date.desc(), Cost.id.desc())
+        .all()
+    )
+
+    body = render_template_string(
+        """<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>Koszty – wydruk</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; margin: 24px; }
+    h2 { margin: 0 0 8px 0; }
+    .meta { color: #555; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }
+    th { background: #f2f2f2; text-align: left; }
+    .small { color:#666; font-size:11px; }
+    @media print { .noprint { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="noprint" style="margin-bottom:10px;">
+    <button onclick="window.print()">Drukuj</button>
+  </div>
+
+  <h2>Koszty – {{ user.name }}</h2>
+  <div class="meta">Wygenerowano: {{ now }}</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Data</th>
+        <th>Kwota</th>
+        <th>Opis</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in costs %}
+      <tr>
+        <td>{{ c.cost_date.isoformat() }}</td>
+        <td>{{ c.amount }}</td>
+        <td>{{ c.description or '' }}</td>
+      </tr>
+      {% endfor %}
+      {% if not costs %}
+      <tr><td colspan="3" class="small">Brak danych.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <script>window.onload = () => { window.print(); };</script>
+</body>
+</html>""",
+        costs=costs,
+        user=current_user,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+    return body
+
+
+
+
 # --- Admin: koszty wszystkich użytkowników ---
 @app.route("/admin/costs", methods=["GET", "POST"])
 @login_required
@@ -1847,7 +1972,13 @@ def admin_costs():
 <div class="row">
   <div class="col-md-12">
     <div class="card p-3">
-      <h5 class="mb-3">Koszty – wszyscy użytkownicy</h5>
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Koszty – wszyscy użytkownicy</h5>
+        <div class="text-end">
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin_costs_export_xlsx') }}">Eksport Excel</a>
+          <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('admin_costs_print') }}">Druk</a>
+        </div>
+      </div>
       <form class="row g-2 mb-3" method="post">
         <div class="col-md-3">
           <label class="form-label">Pracownik</label>
@@ -1910,6 +2041,110 @@ def admin_costs():
 </div>
 """, users=users, costs=costs, date=date)
     return layout("Koszty (admin)", body)
+
+
+
+@app.route("/admin/costs/export.xlsx")
+@login_required
+def admin_costs_export_xlsx():
+    require_admin()
+
+    costs = (
+        Cost.query.join(User)
+        .order_by(Cost.cost_date.desc(), Cost.id.desc())
+        .all()
+    )
+
+    data_rows = []
+    for c in costs:
+        data_rows.append([
+            c.user.name,
+            c.cost_date.isoformat(),
+            (c.amount or "").strip(),
+            (c.description or "").strip(),
+            (c.created_at.strftime("%Y-%m-%d %H:%M") if c.created_at else ""),
+        ])
+
+    headers = ["Użytkownik", "Data", "Kwota", "Opis", "Utworzono"]
+    bio_xlsx = _make_xlsx_bytes(headers, data_rows, sheet_name="Koszty")
+    filename = f"koszty_admin_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return send_file(
+        bio_xlsx,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/admin/costs/print")
+@login_required
+def admin_costs_print():
+    require_admin()
+
+    costs = (
+        Cost.query.join(User)
+        .order_by(Cost.cost_date.desc(), Cost.id.desc())
+        .all()
+    )
+
+    body = render_template_string(
+        """<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>Koszty – wydruk (admin)</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; margin: 24px; }
+    h2 { margin: 0 0 8px 0; }
+    .meta { color: #555; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }
+    th { background: #f2f2f2; text-align: left; }
+    .small { color:#666; font-size:11px; }
+    @media print { .noprint { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="noprint" style="margin-bottom:10px;">
+    <button onclick="window.print()">Drukuj</button>
+  </div>
+
+  <h2>Koszty – zestawienie (admin)</h2>
+  <div class="meta">Wygenerowano: {{ now }}</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Użytkownik</th>
+        <th>Data</th>
+        <th>Kwota</th>
+        <th>Opis</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in costs %}
+      <tr>
+        <td>{{ c.user.name }}</td>
+        <td>{{ c.cost_date.isoformat() }}</td>
+        <td>{{ c.amount }}</td>
+        <td>{{ c.description or '' }}</td>
+      </tr>
+      {% endfor %}
+      {% if not costs %}
+      <tr><td colspan="4" class="small">Brak danych.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <script>window.onload = () => { window.print(); };</script>
+</body>
+</html>""",
+        costs=costs,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+    return body
+
+
 
 
 @app.route("/admin/costs/<int:cost_id>/edit", methods=["GET", "POST"])
@@ -1985,6 +2220,489 @@ def admin_cost_delete(cost_id):
     db.session.commit()
     flash("Usunięto koszt.")
     return redirect(url_for("admin_costs"))
+
+
+# --- Urlopy (Leave requests) ---
+def _leave_status_pl(s: str) -> str:
+    s = (s or "").upper()
+    if s == "DRAFT":
+        return "Szkic"
+    if s == "SUBMITTED":
+        return "Wysłane"
+    if s == "APPROVED":
+        return "Zaakceptowane"
+    return s or "-"
+
+
+
+
+def _make_xlsx_bytes(headers, rows, sheet_name="Dane"):
+    """headers: list[str], rows: iterable[iterable]"""
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31] if sheet_name else "Dane"
+
+    # Header
+    ws.append(list(headers))
+
+    # Rows
+    for r in rows:
+        ws.append(list(r))
+
+    # Basic formatting: bold header + autosize
+    try:
+        from openpyxl.styles import Font
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+    except Exception:
+        pass
+
+    for col_idx in range(1, len(headers) + 1):
+        max_len = 0
+        for cell in ws[get_column_letter(col_idx)]:
+            v = cell.value
+            if v is None:
+                continue
+            s = str(v)
+            if len(s) > max_len:
+                max_len = len(s)
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(10, max_len + 2), 60)
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+@app.route("/leaves", methods=["GET", "POST"])
+@login_required
+def leaves():
+    # Użytkownik: tworzy szkic urlopu
+    if not current_user.is_admin and request.method == "POST":
+        df = request.form.get("date_from")
+        dt = request.form.get("date_to")
+        reason = request.form.get("reason") or ""
+
+        try:
+            date_from = datetime.strptime(df, "%Y-%m-%d").date()
+            date_to = datetime.strptime(dt, "%Y-%m-%d").date()
+        except Exception:
+            flash("Nieprawidłowa data.")
+            return redirect(url_for("leaves"))
+
+        if date_to < date_from:
+            flash("Data 'do' nie może być wcześniejsza niż 'od'.")
+            return redirect(url_for("leaves"))
+
+        lr = LeaveRequest(
+            user_id=current_user.id,
+            date_from=date_from,
+            date_to=date_to,
+            reason=reason,
+            status="DRAFT",
+        )
+        db.session.add(lr)
+        db.session.commit()
+        flash("Dodano prośbę o urlop (szkic).")
+        return redirect(url_for("leaves"))
+
+    # Admin: lista wszystkich
+    if current_user.is_admin:
+        rows = (
+            LeaveRequest.query
+            .join(User, LeaveRequest.user_id == User.id)
+            .order_by(LeaveRequest.created_at.desc(), LeaveRequest.id.desc())
+            .all()
+        )
+
+        body = render_template_string("""
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">Urlopy – wszystkie prośby</h5>
+    <div class="text-end">
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin_leaves_export_xlsx') }}">Eksport Excel</a>
+      <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('admin_leaves_print') }}">Druk</a>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle">
+      <thead>
+        <tr>
+          <th>Pracownik</th>
+          <th>Od</th>
+          <th>Do</th>
+          <th>Status</th>
+          <th>Uzasadnienie</th>
+          <th class="text-end">Akcje</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.user.name }}</td>
+          <td>{{ r.date_from.isoformat() }}</td>
+          <td>{{ r.date_to.isoformat() }}</td>
+          <td>
+            <span class="badge badge-soft">{{ status_pl(r.status) }}</span>
+          </td>
+          <td style="max-width:420px;">{{ (r.reason or '')[:250] }}{% if r.reason and r.reason|length > 250 %}...{% endif %}</td>
+          <td class="text-end text-nowrap">
+            {% if r.status != 'APPROVED' %}
+              <form class="d-inline" method="post" action="{{ url_for('leave_approve', leave_id=r.id) }}" onsubmit="return confirm('Zaakceptować ten urlop?')">
+                <button class="btn btn-sm btn-outline-success">Akceptuj</button>
+              </form>
+            {% endif %}
+            <form class="d-inline" method="post" action="{{ url_for('leave_delete', leave_id=r.id) }}" onsubmit="return confirm('Usunąć tę prośbę?')">
+              <button class="btn btn-sm btn-outline-danger">Usuń</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+          <tr><td colspan="6" class="text-muted">Brak próśb o urlop.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+""", rows=rows, status_pl=_leave_status_pl)
+        return layout("Urlopy (admin)", body)
+
+    # User: lista swoich
+    rows = (
+        LeaveRequest.query
+        .filter(LeaveRequest.user_id == current_user.id)
+        .order_by(LeaveRequest.created_at.desc(), LeaveRequest.id.desc())
+        .all()
+    )
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Zgłoś urlop</h5>
+      <form class="row g-2" method="post">
+        <div class="col-md-3">
+          <label class="form-label">Od</label>
+          <input class="form-control" type="date" name="date_from" value="{{ date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Do</label>
+          <input class="form-control" type="date" name="date_to" value="{{ date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Uzasadnienie</label>
+          <input class="form-control" type="text" name="reason" placeholder="np. wyjazd, sprawy rodzinne">
+        </div>
+        <div class="col-12">
+          <button class="btn btn-primary">Dodaj (szkic)</button>
+        </div>
+      </form>
+      <div class="small text-muted mt-2">
+        Najpierw dodajesz szkic, potem przy prośbie klikasz „Wyślij do akceptacji”.
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-0">Moje urlopy</h5>
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>Od</th>
+              <th>Do</th>
+              <th>Status</th>
+              <th>Uzasadnienie</th>
+              <th class="text-end">Akcje</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+            <tr>
+              <td>{{ r.date_from.isoformat() }}</td>
+              <td>{{ r.date_to.isoformat() }}</td>
+              <td><span class="badge badge-soft">{{ status_pl(r.status) }}</span></td>
+              <td style="max-width:520px;">{{ r.reason or '' }}</td>
+              <td class="text-end text-nowrap">
+                {% if r.status != 'APPROVED' %}
+                  <a class="btn btn-sm btn-outline-primary" href="{{ url_for('leave_edit', leave_id=r.id) }}">Edytuj</a>
+                  <form class="d-inline" method="post" action="{{ url_for('leave_delete', leave_id=r.id) }}" onsubmit="return confirm('Usunąć tę prośbę?')">
+                    <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                  </form>
+                  {% if r.status == 'DRAFT' %}
+                    <form class="d-inline" method="post" action="{{ url_for('leave_submit', leave_id=r.id) }}" onsubmit="return confirm('Wysłać do akceptacji?')">
+                      <button class="btn btn-sm btn-outline-success">Wyślij do akceptacji</button>
+                    </form>
+                  {% endif %}
+                {% else %}
+                  <span class="text-muted">Zaakceptowane – bez zmian</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% else %}
+              <tr><td colspan="5" class="text-muted">Brak próśb o urlop.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+""", rows=rows, status_pl=_leave_status_pl, date=date)
+    return layout("Urlopy", body)
+
+
+
+@app.route("/admin/leaves/export.xlsx")
+@login_required
+def admin_leaves_export_xlsx():
+    require_admin()
+    rows = (
+        LeaveRequest.query.join(User)
+        .order_by(LeaveRequest.created_at.desc())
+        .all()
+    )
+
+    data_rows = []
+    for r in rows:
+        days = None
+        try:
+            days = (r.date_to - r.date_from).days + 1
+        except Exception:
+            pass
+        data_rows.append([
+            r.user.name,
+            r.date_from.isoformat(),
+            r.date_to.isoformat(),
+            days,
+            _leave_status_pl(r.status),
+            (r.reason or "").strip(),
+            (r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""),
+            (r.submitted_at.strftime("%Y-%m-%d %H:%M") if getattr(r, "submitted_at", None) else ""),
+            (r.approved_at.strftime("%Y-%m-%d %H:%M") if getattr(r, "approved_at", None) else ""),
+        ])
+
+    headers = ["Użytkownik", "Od", "Do", "Dni", "Status", "Uzasadnienie", "Utworzono", "Wysłano", "Zaakceptowano"]
+    bio_xlsx = _make_xlsx_bytes(headers, data_rows, sheet_name="Urlopy")
+    filename = f"urlopy_admin_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return send_file(
+        bio_xlsx,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/admin/leaves/print")
+@login_required
+def admin_leaves_print():
+    require_admin()
+    rows = (
+        LeaveRequest.query.join(User)
+        .order_by(LeaveRequest.created_at.desc())
+        .all()
+    )
+
+    body = render_template_string(
+        """<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>Urlopy – wydruk</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; margin: 24px; }
+    h2 { margin: 0 0 8px 0; }
+    .meta { color: #555; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #999; padding: 6px 8px; vertical-align: top; }
+    th { background: #f2f2f2; text-align: left; }
+    .small { color:#666; font-size:11px; }
+    @media print { .noprint { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="noprint" style="margin-bottom:10px;">
+    <button onclick="window.print()">Drukuj</button>
+  </div>
+
+  <h2>Urlopy – zestawienie (admin)</h2>
+  <div class="meta">Wygenerowano: {{ now }}</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Użytkownik</th>
+        <th>Od</th>
+        <th>Do</th>
+        <th>Dni</th>
+        <th>Status</th>
+        <th>Uzasadnienie</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.user.name }}</td>
+        <td>{{ r.date_from.isoformat() }}</td>
+        <td>{{ r.date_to.isoformat() }}</td>
+        <td>
+          {% set d = (r.date_to - r.date_from).days + 1 %}
+          {{ d }}
+        </td>
+        <td>{{ status_pl(r.status) }}</td>
+        <td>{{ r.reason or '' }}</td>
+      </tr>
+      {% endfor %}
+      {% if not rows %}
+      <tr><td colspan="6" class="small">Brak danych.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <script>window.onload = () => { window.print(); };</script>
+</body>
+</html>""",
+        rows=rows,
+        status_pl=_leave_status_pl,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+    return body
+
+
+
+
+@app.route("/leaves/<int:leave_id>/edit", methods=["GET", "POST"])
+@login_required
+def leave_edit(leave_id):
+    lr = LeaveRequest.query.get_or_404(leave_id)
+    if not (current_user.is_admin or lr.user_id == current_user.id):
+        abort(403)
+
+    if lr.status == "APPROVED":
+        flash("Zaakceptowanej prośby nie można edytować.")
+        return redirect(url_for("leaves"))
+
+    if request.method == "POST":
+        df = request.form.get("date_from")
+        dt = request.form.get("date_to")
+        reason = request.form.get("reason") or ""
+
+        try:
+            date_from = datetime.strptime(df, "%Y-%m-%d").date()
+            date_to = datetime.strptime(dt, "%Y-%m-%d").date()
+        except Exception:
+            flash("Nieprawidłowa data.")
+            return redirect(url_for("leave_edit", leave_id=leave_id))
+
+        if date_to < date_from:
+            flash("Data 'do' nie może być wcześniejsza niż 'od'.")
+            return redirect(url_for("leave_edit", leave_id=leave_id))
+
+        lr.date_from = date_from
+        lr.date_to = date_to
+        lr.reason = reason
+        db.session.commit()
+        flash("Zapisano zmiany.")
+        return redirect(url_for("leaves"))
+
+    body = render_template_string("""
+<div class="row justify-content-center">
+  <div class="col-md-7">
+    <div class="card p-3">
+      <h5 class="mb-3">Edytuj prośbę o urlop</h5>
+      <form class="row g-2" method="post">
+        <div class="col-md-4">
+          <label class="form-label">Od</label>
+          <input class="form-control" type="date" name="date_from" value="{{ lr.date_from.isoformat() }}" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Do</label>
+          <input class="form-control" type="date" name="date_to" value="{{ lr.date_to.isoformat() }}" required>
+        </div>
+        <div class="col-md-12">
+          <label class="form-label">Uzasadnienie</label>
+          <input class="form-control" type="text" name="reason" value="{{ lr.reason or '' }}">
+        </div>
+        <div class="col-12 d-flex gap-2">
+          <button class="btn btn-primary">Zapisz</button>
+          <a class="btn btn-outline-secondary" href="{{ url_for('leaves') }}">Anuluj</a>
+        </div>
+      </form>
+      {% if lr.status == 'SUBMITTED' %}
+        <div class="small text-muted mt-2">Ta prośba jest już wysłana do akceptacji. Nadal możesz ją edytować/usunąć, dopóki nie zostanie zaakceptowana.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+""", lr=lr)
+    return layout("Edytuj urlop", body)
+
+
+@app.route("/leaves/<int:leave_id>/delete", methods=["POST"])
+@login_required
+def leave_delete(leave_id):
+    lr = LeaveRequest.query.get_or_404(leave_id)
+
+    if current_user.is_admin:
+        db.session.delete(lr)
+        db.session.commit()
+        flash("Usunięto prośbę o urlop.")
+        return redirect(url_for("leaves"))
+
+    if lr.user_id != current_user.id:
+        abort(403)
+
+    if lr.status == "APPROVED":
+        flash("Zaakceptowanej prośby nie można usunąć.")
+        return redirect(url_for("leaves"))
+
+    db.session.delete(lr)
+    db.session.commit()
+    flash("Usunięto prośbę o urlop.")
+    return redirect(url_for("leaves"))
+
+
+@app.route("/leaves/<int:leave_id>/submit", methods=["POST"])
+@login_required
+def leave_submit(leave_id):
+    lr = LeaveRequest.query.get_or_404(leave_id)
+    if lr.user_id != current_user.id and not current_user.is_admin:
+        abort(403)
+
+    if lr.status == "APPROVED":
+        flash("Ta prośba jest już zaakceptowana.")
+        return redirect(url_for("leaves"))
+
+    if lr.status != "DRAFT":
+        flash("Ta prośba jest już wysłana do akceptacji.")
+        return redirect(url_for("leaves"))
+
+    lr.status = "SUBMITTED"
+    lr.submitted_at = datetime.utcnow()
+    db.session.commit()
+    flash("Wysłano do akceptacji.")
+    return redirect(url_for("leaves"))
+
+
+@app.route("/leaves/<int:leave_id>/approve", methods=["POST"])
+@login_required
+def leave_approve(leave_id):
+    require_admin()
+    lr = LeaveRequest.query.get_or_404(leave_id)
+
+    if lr.status == "APPROVED":
+        flash("Ta prośba jest już zaakceptowana.")
+        return redirect(url_for("leaves"))
+
+    lr.status = "APPROVED"
+    lr.decided_at = datetime.utcnow()
+    lr.decided_by = current_user.id
+    db.session.commit()
+    flash("Zaakceptowano prośbę o urlop.")
+    return redirect(url_for("leaves"))
+
 
 
 
