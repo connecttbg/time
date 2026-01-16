@@ -6,6 +6,7 @@ import tempfile
 import errno
 import shutil
 import smtplib
+import uuid
 from email.message import EmailMessage
 from datetime import datetime, date, timedelta
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
@@ -18,6 +19,10 @@ from sqlalchemy import text as sql_text, and_
 # --- Flask & DB config ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_FILE = os.path.join(BASE_DIR, "app.db")
+
+# Zdjęcia do wpisów (trzymamy obok bazy, nie w static)
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-me")
@@ -69,6 +74,21 @@ class Entry(db.Model):
 
     user = db.relationship("User", backref="entries")
     project = db.relationship("Project", backref="entries")
+
+    images = db.relationship(
+        "EntryImage",
+        backref="entry",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class EntryImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("entry.id"), nullable=False, index=True)
+    stored_filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class Cost(db.Model):
@@ -154,10 +174,62 @@ def require_admin():
 
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     with app.app_context():
         db.create_all()
         try:
             db.session.execute(sql_text("SELECT 1"))
+        except Exception:
+            pass
+
+
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _safe_image_filename(original_name: str, entry_id: int) -> str:
+    """Buduje bezpieczną, unikalną nazwę pliku dla zdjęcia wpisu."""
+    original_name = original_name or "image"
+    base = secure_filename(original_name) or "image"
+    _, ext = os.path.splitext(base)
+    ext = (ext or "").lower()
+    if ext not in ALLOWED_IMAGE_EXTS:
+        # domyślnie PNG (ale i tak odrzucamy pliki bez rozszerzeń obrazków)
+        ext = ext if ext else ".png"
+    return f"e{entry_id}_{uuid.uuid4().hex}{ext}"
+
+
+def _save_entry_images(entry, files):
+    """Zapisuje zdjęcia do UPLOAD_DIR i tworzy rekordy w bazie."""
+    if not files:
+        return
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    for f in files:
+        if not f or not getattr(f, "filename", ""):
+            continue
+        name = f.filename
+        _, ext = os.path.splitext(name)
+        ext = (ext or "").lower()
+        if ext not in ALLOWED_IMAGE_EXTS:
+            # pomijamy pliki nie będące obrazkami
+            continue
+
+        stored = _safe_image_filename(name, entry.id)
+        path = os.path.join(UPLOAD_DIR, stored)
+        f.save(path)
+        db.session.add(EntryImage(entry_id=entry.id, stored_filename=stored, original_filename=name))
+
+
+def _delete_entry_images_files(entry):
+    """Kasuje z dysku zdjęcia przypisane do wpisu."""
+    try:
+        imgs = list(entry.images)
+    except Exception:
+        imgs = []
+    for img in imgs:
+        try:
+            p = os.path.join(UPLOAD_DIR, img.stored_filename)
+            if os.path.exists(p):
+                os.remove(p)
         except Exception:
             pass
 
@@ -322,6 +394,7 @@ def dashboard():
         is_extra = bool(request.form.get("is_extra"))
         is_overtime = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
+        images_files = request.files.getlist("images")
 
         # Konwersja daty z formularza
         try:
@@ -350,6 +423,14 @@ def dashboard():
         )
         db.session.add(e)
         db.session.commit()
+
+        # zapis zdjęć (opcjonalnie)
+        try:
+            _save_entry_images(e, images_files)
+            db.session.commit()
+        except Exception:
+            # nie blokujemy dodania wpisu, jeśli zdjęcie nie zapisze się z jakiegoś powodu
+            db.session.rollback()
         flash("Dodano wpis.")
         return redirect(url_for("dashboard"))
 
@@ -374,7 +455,7 @@ def dashboard():
   <div class="col-12">
     <div class="card p-3">
       <h5 class="mb-3">Dodaj godziny</h5>
-      <form class="row g-2" method="post">
+      <form class="row g-2" method="post" enctype="multipart/form-data">
         <div class="col-md-3">
           <label class="form-label">Data</label>
           <input class="form-control" type="date" name="work_date" value="{{ date.today().isoformat() }}" required>
@@ -405,6 +486,11 @@ def dashboard():
           <label class="form-label">Notatka</label>
           <input class="form-control" type="text" name="note" placeholder="opcjonalnie">
         </div>
+        <div class="col-md-12">
+          <label class="form-label">Zdjęcia</label>
+          <input class="form-control" type="file" name="images" accept="image/*" capture="environment" multiple>
+          <div class="form-text">Możesz dodać jedno lub więcej zdjęć (z galerii albo z aparatu).</div>
+        </div>
         <div class="col-12">
           <button class="btn btn-primary">Zapisz</button>
         </div>
@@ -420,7 +506,7 @@ def dashboard():
       <div class="table-responsive mt-3">
         <table class="table table-sm align-middle">
           <thead>
-            <tr><th>Data</th><th>Projekt</th><th>Notatka</th><th>Godziny</th><th>Extra</th><th>OT</th><th class="text-end">Akcje</th></tr>
+            <tr><th>Data</th><th>Projekt</th><th>Notatka</th><th>Zdjęcia</th><th>Godziny</th><th>Extra</th><th>OT</th><th class="text-end">Akcje</th></tr>
           </thead>
           <tbody>
             {% for e in entries %}
@@ -428,6 +514,13 @@ def dashboard():
               <td>{{ e.work_date.isoformat() }}</td>
               <td>{{ e.project.name }}</td>
               <td>{{ e.note or '' }}</td>
+              <td>
+                {% if e.images %}
+                  {% for img in e.images %}
+                    <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                  {% endfor %}
+                {% else %}-{% endif %}
+              </td>
               <td>{{ fmt(e.minutes) }}</td>
               <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
               <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
@@ -478,7 +571,7 @@ def edit_entry(entry_id):
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Edytuj wpis</h5>
-  <form class="row g-2" method="post">
+  <form class="row g-2" method="post" enctype="multipart/form-data">
     <div class="col-md-3">
       <label class="form-label">Data</label>
       <input class="form-control" type="date" name="work_date" value="{{ e.work_date.isoformat() }}" required>
@@ -525,10 +618,26 @@ def delete_entry(entry_id):
     e = Entry.query.get_or_404(entry_id)
     if not (current_user.is_admin or e.user_id == current_user.id):
         abort(403)
+    _delete_entry_images_files(e)
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
     return redirect(url_for("dashboard" if not current_user.is_admin else "admin_entries"))
+
+
+@app.route("/image/<int:image_id>")
+@login_required
+def entry_image_view(image_id):
+    img = EntryImage.query.get_or_404(image_id)
+    e = Entry.query.get(img.entry_id)
+    if not e:
+        abort(404)
+    if not (current_user.is_admin or e.user_id == current_user.id):
+        abort(403)
+    path = os.path.join(UPLOAD_DIR, img.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path)
 
 
 # --- Admin: overview (monthly totals) ---
@@ -734,7 +843,7 @@ def admin_user_edit(uid):
   </form>
 
   <h6>Reset hasła</h6>
-  <form class="row g-2" method="post">
+  <form class="row g-2" method="post" enctype="multipart/form-data">
     <input type="hidden" name="action" value="set_password">
     <div class="col-md-4"><input class="form-control" type="text" name="password" placeholder="Nowe hasło"></div>
     <div class="col-md-2"><button class="btn btn-outline-primary">Ustaw hasło</button></div>
@@ -863,12 +972,21 @@ def admin_entries():
         is_extra = bool(request.form.get("is_extra"))
         is_ot = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
+        images_files = request.files.getlist("images")
 
-        db.session.add(Entry(
+        e = Entry(
             user_id=uid, project_id=pid, work_date=work_date,
             minutes=minutes, is_extra=is_extra, is_overtime=is_ot, note=note
-        ))
+        )
+        db.session.add(e)
         db.session.commit()
+
+        # zapis zdjęć (opcjonalnie)
+        try:
+            _save_entry_images(e, images_files)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         flash("Dodano wpis.")
         return redirect(url_for("admin_entries"))
 
@@ -934,6 +1052,11 @@ def admin_entries():
       <input class="form-control" type="text" name="note" placeholder="opcjonalnie">
     </div>
     <div class="col-12">
+      <label class="form-label">Zdjęcia</label>
+      <input class="form-control" type="file" name="images" accept="image/*" capture="environment" multiple>
+      <div class="form-text">Opcjonalne zdjęcia do wpisu.</div>
+    </div>
+    <div class="col-12">
       <button class="btn btn-primary">Zapisz</button>
     </div>
   </form>
@@ -962,7 +1085,7 @@ def admin_entries():
   <div class="table-responsive mt-3">
     <table class="table table-sm align-middle">
       <thead>
-        <tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Notatka</th><th>Godziny</th><th>Extra</th><th>OT</th><th></th></tr>
+        <tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Notatka</th><th>Zdjęcia</th><th>Godziny</th><th>Extra</th><th>OT</th><th></th></tr>
       </thead>
       <tbody>
         {% for e in entries %}
@@ -971,6 +1094,13 @@ def admin_entries():
           <td>{{ e.user.name }}</td>
           <td>{{ e.project.name }}</td>
           <td>{{ e.note or '' }}</td>
+          <td>
+            {% if e.images %}
+              {% for img in e.images %}
+                <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+              {% endfor %}
+            {% else %}-{% endif %}
+          </td>
           <td>{{ fmt(e.minutes) }}</td>
           <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
           <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
@@ -1068,6 +1198,7 @@ def admin_entry_edit(entry_id):
 def admin_entry_delete(entry_id):
     require_admin()
     e = Entry.query.get_or_404(entry_id)
+    _delete_entry_images_files(e)
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
@@ -1075,6 +1206,26 @@ def admin_entry_delete(entry_id):
 
 
 # --- Backup / Restore ---
+def _add_uploads_to_zip(z: zipfile.ZipFile):
+    """Dodaje folder uploads do archiwum. Wspiera przywracanie zdjęć."""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # marker, żeby folder istniał nawet gdy nie ma zdjęć
+    keep_path = os.path.join(UPLOAD_DIR, ".keep")
+    if not os.path.exists(keep_path):
+        try:
+            open(keep_path, "a").close()
+        except Exception:
+            pass
+    for root, _, files in os.walk(UPLOAD_DIR):
+        for fn in files:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, UPLOAD_DIR)
+            arc = os.path.join("uploads", rel).replace("\\", "/")
+            try:
+                z.write(full, arcname=arc)
+            except Exception:
+                pass
+
 def _make_zip_bytes(path)->bytes:
     ensure_db_file()
     if not os.path.exists(path):
@@ -1083,6 +1234,7 @@ def _make_zip_bytes(path)->bytes:
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(path, arcname="app.db")
+        _add_uploads_to_zip(z)
     mem.seek(0)
     return mem.read()
 
@@ -1113,12 +1265,36 @@ def _replace_db_from_zipfileobj(fileobj):
     except Exception:
         pass
 
-    # Nadpisanie pliku bazy danymi z kopii zapasowej
+    # Nadpisanie pliku bazy danymi z kopii zapasowej + odtworzenie zdjęć
     with zipfile.ZipFile(fileobj, "r") as z:
-        if "app.db" not in z.namelist():
+        names = z.namelist()
+        if "app.db" not in names:
             raise RuntimeError("Brak pliku 'app.db' w archiwum.")
         with z.open("app.db") as src, open(target_path, "wb") as dst:
             shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+        # Zdjęcia: folder uploads/*
+        upload_names = [n for n in names if n.startswith("uploads/")]
+        # Czyścimy lokalny folder i odtwarzamy z backupu
+        try:
+            if os.path.exists(UPLOAD_DIR):
+                shutil.rmtree(UPLOAD_DIR)
+        except Exception:
+            pass
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        for n in upload_names:
+            if n.endswith("/"):
+                continue
+            rel = n[len("uploads/"):]
+            if not rel or rel == ".keep":
+                continue
+            out_path = os.path.join(UPLOAD_DIR, rel)
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            try:
+                with z.open(n) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+            except Exception:
+                pass
 
     # Odtworzenie struktury (jeśli trzeba), bez kasowania danych
     ensure_db_file()
@@ -1209,6 +1385,7 @@ def admin_backup_create_save():
             open(DB_FILE, "a").close()
             ensure_db_file()
         z.write(DB_FILE, arcname="app.db")
+        _add_uploads_to_zip(z)
     flash(f"Zapisano: {os.path.basename(zip_path)}")
     return redirect(url_for("admin_backup"))
 
