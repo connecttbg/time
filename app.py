@@ -488,7 +488,7 @@ def dashboard():
         </div>
         <div class="col-md-12">
           <label class="form-label">Zdjęcia</label>
-          <input class="form-control" type="file" name="images" accept="image/*" capture="environment" multiple>
+          <input class="form-control" type="file" name="images" accept="image/*" multiple>
           <div class="form-text">Możesz dodać jedno lub więcej zdjęć (z galerii albo z aparatu).</div>
         </div>
         <div class="col-12">
@@ -1053,7 +1053,7 @@ def admin_entries():
     </div>
     <div class="col-12">
       <label class="form-label">Zdjęcia</label>
-      <input class="form-control" type="file" name="images" accept="image/*" capture="environment" multiple>
+      <input class="form-control" type="file" name="images" accept="image/*" multiple>
       <div class="form-text">Opcjonalne zdjęcia do wpisu.</div>
     </div>
     <div class="col-12">
