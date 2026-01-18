@@ -7,6 +7,7 @@ import errno
 import shutil
 import smtplib
 import uuid
+from typing import Optional
 from email.message import EmailMessage
 from datetime import datetime, date, timedelta
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
@@ -16,12 +17,32 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_
 
+# Zdjęcia: kompresja i konwersja do JPEG przy zapisie
+from PIL import Image
+from PIL.ImageOps import exif_transpose
+
+# HEIC/HEIF (iPhone) – opcjonalnie. Jeśli biblioteka nie będzie dostępna,
+# takie pliki zostaną odrzucone z czytelnym komunikatem.
+try:
+    from pillow_heif import register_heif_opener  # type: ignore
+    register_heif_opener()
+    HEIF_SUPPORTED = True
+except Exception:
+    HEIF_SUPPORTED = False
+
 # --- Flask & DB config ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_FILE = os.path.join(BASE_DIR, "app.db")
+
+# Render: jeśli masz podpięty Persistent Disk, Render montuje go zwykle w /var/data.
+# Trzymamy tam bazę i uploady, żeby:
+# - zapisy działały (czasem katalog z kodem bywa niewygodny do zapisu),
+# - pliki nie znikały po deployu/resecie.
+DATA_DIR = "/var/data" if os.path.exists("/var/data") else BASE_DIR
+
+DB_FILE = os.path.join(DATA_DIR, "app.db")
 
 # Zdjęcia do wpisów (trzymamy obok bazy, nie w static)
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -183,20 +204,63 @@ def ensure_db_file():
             pass
 
 
-# Telefony (szczególnie iPhone) często wysyłają zdjęcia jako HEIC/HEIF.
-ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
+# Telefony wysyłają głównie JPG/PNG. iPhone potrafi HEIC/HEIF – obsługujemy,
+# jeśli pillow-heif jest dostępne.
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+if HEIF_SUPPORTED:
+    ALLOWED_IMAGE_EXTS.update({".heic", ".heif"})
+
+# Ograniczenia, żeby backup i dysk nie puchły
+MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "8"))  # limit na plik przed kompresją
+MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024
+IMAGE_MAX_PX = int(os.getenv("IMAGE_MAX_PX", "1600"))  # dłuższy bok
+IMAGE_JPEG_QUALITY = int(os.getenv("IMAGE_JPEG_QUALITY", "75"))
+
+
+def _file_size_bytes(file_storage) -> Optional[int]:
+    """Próbuje odczytać rozmiar pliku z FileStorage bez ładowania w pamięć."""
+    try:
+        if getattr(file_storage, "content_length", None):
+            return int(file_storage.content_length)
+    except Exception:
+        pass
+    try:
+        stream = file_storage.stream
+        pos = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(pos)
+        return int(size)
+    except Exception:
+        return None
+
+
+def _save_compressed_image(file_storage, out_path: str) -> None:
+    """Zmniejsza i kompresuje obraz do JPEG, zapisuje na dysku."""
+    # Ważne: Image.open czyta ze strumienia, więc nie używamy file.save(...)
+    img = Image.open(file_storage.stream)
+    img = exif_transpose(img)
+
+    # animowane GIF – bierzemy pierwszą klatkę
+    try:
+        if getattr(img, "is_animated", False):
+            img.seek(0)
+    except Exception:
+        pass
+
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    img.thumbnail((IMAGE_MAX_PX, IMAGE_MAX_PX))
+    img.save(out_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True, progressive=True)
 
 
 def _safe_image_filename(original_name: str, entry_id: int) -> str:
     """Buduje bezpieczną, unikalną nazwę pliku dla zdjęcia wpisu."""
-    original_name = original_name or "image"
-    base = secure_filename(original_name) or "image"
-    _, ext = os.path.splitext(base)
-    ext = (ext or "").lower()
-    if ext not in ALLOWED_IMAGE_EXTS:
-        # domyślnie PNG (ale i tak odrzucamy pliki bez rozszerzeń obrazków)
-        ext = ext if ext else ".png"
-    return f"e{entry_id}_{uuid.uuid4().hex}{ext}"
+    # Zawsze zapisujemy jako JPEG (mniejszy plik + prostszy backup)
+    return f"e{entry_id}_{uuid.uuid4().hex}.jpg"
 
 
 def _save_entry_images(entry, files):
@@ -211,13 +275,31 @@ def _save_entry_images(entry, files):
         _, ext = os.path.splitext(name)
         ext = (ext or "").lower()
         if ext not in ALLOWED_IMAGE_EXTS:
-            # pomijamy pliki nie będące obrazkami
+            continue
+
+        # HEIC/HEIF bez pillow-heif nie otworzymy – dajemy jasny komunikat
+        if ext in {".heic", ".heif"} and not HEIF_SUPPORTED:
+            flash("Ten telefon wysłał zdjęcie HEIC/HEIF. Zmień w iPhonie: Ustawienia > Aparat > Formaty > Najbardziej zgodne (JPG).")
+            continue
+
+        size = _file_size_bytes(f)
+        if size is not None and size > MAX_IMAGE_BYTES:
+            flash(f"Zdjęcie jest za duże ({MAX_IMAGE_MB} MB max). Zmniejsz je lub wyślij mniejsze.")
             continue
 
         stored = _safe_image_filename(name, entry.id)
         path = os.path.join(UPLOAD_DIR, stored)
-        f.save(path)
-        db.session.add(EntryImage(entry_id=entry.id, stored_filename=stored, original_filename=name))
+        try:
+            # upewnij się, że czytamy od początku strumienia
+            try:
+                f.stream.seek(0)
+            except Exception:
+                pass
+            _save_compressed_image(f, path)
+            db.session.add(EntryImage(entry_id=entry.id, stored_filename=stored, original_filename=name))
+        except Exception:
+            # Nie blokujemy dodawania godzin, ale informujemy
+            flash("Nie udało się zapisać jednego ze zdjęć. Spróbuj ponownie lub wyślij inne zdjęcie.")
 
 
 def _delete_entry_images_files(entry):
