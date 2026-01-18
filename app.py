@@ -6,6 +6,8 @@ import tempfile
 import errno
 import shutil
 import smtplib
+import uuid
+from typing import Optional
 from email.message import EmailMessage
 from datetime import datetime, date, timedelta
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
@@ -15,14 +17,33 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_
 
+# Zdjęcia: kompresja i konwersja do JPEG przy zapisie
+from PIL import Image
+from PIL.ImageOps import exif_transpose
+
+# HEIC/HEIF (iPhone) – opcjonalnie. Jeśli biblioteka nie będzie dostępna,
+# takie pliki zostaną odrzucone z czytelnym komunikatem.
+try:
+    from pillow_heif import register_heif_opener  # type: ignore
+    register_heif_opener()
+    HEIF_SUPPORTED = True
+except Exception:
+    HEIF_SUPPORTED = False
+
 # --- Flask & DB config ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_FILE = os.path.join(BASE_DIR, "app.db")
 
-# Folder na zdjecia (pliki fizyczne). Trzymamy go obok bazy,
-# zeby backup/restore byly proste.
-UPLOAD_DIR = os.path.join(os.path.dirname(DB_FILE) or '.', 'uploads')
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Render: jeśli masz podpięty Persistent Disk, Render montuje go zwykle w /var/data.
+# Trzymamy tam bazę i uploady, żeby:
+# - zapisy działały (czasem katalog z kodem bywa niewygodny do zapisu),
+# - pliki nie znikały po deployu/resecie.
+DATA_DIR = "/var/data" if os.path.exists("/var/data") else BASE_DIR
+
+DB_FILE = os.path.join(DATA_DIR, "app.db")
+
+# Zdjęcia do wpisów (trzymamy obok bazy, nie w static)
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-me")
@@ -74,6 +95,21 @@ class Entry(db.Model):
 
     user = db.relationship("User", backref="entries")
     project = db.relationship("Project", backref="entries")
+
+    images = db.relationship(
+        "EntryImage",
+        backref="entry",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class EntryImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("entry.id"), nullable=False, index=True)
+    stored_filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class Cost(db.Model):
@@ -159,10 +195,124 @@ def require_admin():
 
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     with app.app_context():
         db.create_all()
         try:
             db.session.execute(sql_text("SELECT 1"))
+        except Exception:
+            pass
+
+
+# Telefony wysyłają głównie JPG/PNG. iPhone potrafi HEIC/HEIF – obsługujemy,
+# jeśli pillow-heif jest dostępne.
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+if HEIF_SUPPORTED:
+    ALLOWED_IMAGE_EXTS.update({".heic", ".heif"})
+
+# Ograniczenia, żeby backup i dysk nie puchły
+MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "8"))  # limit na plik przed kompresją
+MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024
+IMAGE_MAX_PX = int(os.getenv("IMAGE_MAX_PX", "1600"))  # dłuższy bok
+IMAGE_JPEG_QUALITY = int(os.getenv("IMAGE_JPEG_QUALITY", "75"))
+
+
+def _file_size_bytes(file_storage) -> Optional[int]:
+    """Próbuje odczytać rozmiar pliku z FileStorage bez ładowania w pamięć."""
+    try:
+        if getattr(file_storage, "content_length", None):
+            return int(file_storage.content_length)
+    except Exception:
+        pass
+    try:
+        stream = file_storage.stream
+        pos = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(pos)
+        return int(size)
+    except Exception:
+        return None
+
+
+def _save_compressed_image(file_storage, out_path: str) -> None:
+    """Zmniejsza i kompresuje obraz do JPEG, zapisuje na dysku."""
+    # Ważne: Image.open czyta ze strumienia, więc nie używamy file.save(...)
+    img = Image.open(file_storage.stream)
+    img = exif_transpose(img)
+
+    # animowane GIF – bierzemy pierwszą klatkę
+    try:
+        if getattr(img, "is_animated", False):
+            img.seek(0)
+    except Exception:
+        pass
+
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    img.thumbnail((IMAGE_MAX_PX, IMAGE_MAX_PX))
+    img.save(out_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True, progressive=True)
+
+
+def _safe_image_filename(original_name: str, entry_id: int) -> str:
+    """Buduje bezpieczną, unikalną nazwę pliku dla zdjęcia wpisu."""
+    # Zawsze zapisujemy jako JPEG (mniejszy plik + prostszy backup)
+    return f"e{entry_id}_{uuid.uuid4().hex}.jpg"
+
+
+def _save_entry_images(entry, files):
+    """Zapisuje zdjęcia do UPLOAD_DIR i tworzy rekordy w bazie."""
+    if not files:
+        return
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    for f in files:
+        if not f or not getattr(f, "filename", ""):
+            continue
+        name = f.filename
+        _, ext = os.path.splitext(name)
+        ext = (ext or "").lower()
+        if ext not in ALLOWED_IMAGE_EXTS:
+            continue
+
+        # HEIC/HEIF bez pillow-heif nie otworzymy – dajemy jasny komunikat
+        if ext in {".heic", ".heif"} and not HEIF_SUPPORTED:
+            flash("Ten telefon wysłał zdjęcie HEIC/HEIF. Zmień w iPhonie: Ustawienia > Aparat > Formaty > Najbardziej zgodne (JPG).")
+            continue
+
+        size = _file_size_bytes(f)
+        if size is not None and size > MAX_IMAGE_BYTES:
+            flash(f"Zdjęcie jest za duże ({MAX_IMAGE_MB} MB max). Zmniejsz je lub wyślij mniejsze.")
+            continue
+
+        stored = _safe_image_filename(name, entry.id)
+        path = os.path.join(UPLOAD_DIR, stored)
+        try:
+            # upewnij się, że czytamy od początku strumienia
+            try:
+                f.stream.seek(0)
+            except Exception:
+                pass
+            _save_compressed_image(f, path)
+            db.session.add(EntryImage(entry_id=entry.id, stored_filename=stored, original_filename=name))
+        except Exception:
+            # Nie blokujemy dodawania godzin, ale informujemy
+            flash("Nie udało się zapisać jednego ze zdjęć. Spróbuj ponownie lub wyślij inne zdjęcie.")
+
+
+def _delete_entry_images_files(entry):
+    """Kasuje z dysku zdjęcia przypisane do wpisu."""
+    try:
+        imgs = list(entry.images)
+    except Exception:
+        imgs = []
+    for img in imgs:
+        try:
+            p = os.path.join(UPLOAD_DIR, img.stored_filename)
+            if os.path.exists(p):
+                os.remove(p)
         except Exception:
             pass
 
@@ -327,6 +477,19 @@ def dashboard():
         is_extra = bool(request.form.get("is_extra"))
         is_overtime = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
+        images_files = request.files.getlist("images")
+
+
+        valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
+        if len(valid_images) > 5:
+            flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
+            return redirect(url_for('admin_entries'))
+
+
+        valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
+        if len(valid_images) > 5:
+            flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
+            return redirect(url_for('dashboard'))
 
         # Konwersja daty z formularza
         try:
@@ -355,6 +518,14 @@ def dashboard():
         )
         db.session.add(e)
         db.session.commit()
+
+        # zapis zdjęć (opcjonalnie)
+        try:
+            _save_entry_images(e, images_files)
+            db.session.commit()
+        except Exception:
+            # nie blokujemy dodania wpisu, jeśli zdjęcie nie zapisze się z jakiegoś powodu
+            db.session.rollback()
         flash("Dodano wpis.")
         return redirect(url_for("dashboard"))
 
@@ -379,7 +550,7 @@ def dashboard():
   <div class="col-12">
     <div class="card p-3">
       <h5 class="mb-3">Dodaj godziny</h5>
-      <form class="row g-2" method="post">
+      <form id="entryForm" class="row g-2" method="post" enctype="multipart/form-data">
         <div class="col-md-3">
           <label class="form-label">Data</label>
           <input class="form-control" type="date" name="work_date" value="{{ date.today().isoformat() }}" required>
@@ -410,6 +581,25 @@ def dashboard():
           <label class="form-label">Notatka</label>
           <input class="form-control" type="text" name="note" placeholder="opcjonalnie">
         </div>
+        <div class="col-md-12">
+          <label class="form-label">Zdjęcia</label>
+          <input id="imagesInput" class="form-control" type="file" name="images" accept="image/*" multiple onchange="limitFiles(this,5)">
+          <div class="form-text">Możesz dodać maksymalnie 5 zdjęć (z galerii albo z aparatu).</div>
+        </div>
+
+    <div id="uploadProgress" class="col-12" style="display:none;">
+      <div class="progress">
+        <div id="uploadBar" class="progress-bar" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <div class="small text-muted mt-1" id="uploadText">0%</div>
+    </div>
+
+    <div id="uploadProgressAdmin" class="col-12" style="display:none;">
+      <div class="progress">
+        <div id="uploadBarAdmin" class="progress-bar" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <div class="small text-muted mt-1" id="uploadTextAdmin">0%</div>
+    </div>
         <div class="col-12">
           <button class="btn btn-primary">Zapisz</button>
         </div>
@@ -425,7 +615,7 @@ def dashboard():
       <div class="table-responsive mt-3">
         <table class="table table-sm align-middle">
           <thead>
-            <tr><th>Data</th><th>Projekt</th><th>Notatka</th><th>Godziny</th><th>Extra</th><th>OT</th><th class="text-end">Akcje</th></tr>
+            <tr><th>Data</th><th>Projekt</th><th>Notatka</th><th>Zdjęcia</th><th>Godziny</th><th>Extra</th><th>OT</th><th class="text-end">Akcje</th></tr>
           </thead>
           <tbody>
             {% for e in entries %}
@@ -433,6 +623,13 @@ def dashboard():
               <td>{{ e.work_date.isoformat() }}</td>
               <td>{{ e.project.name }}</td>
               <td>{{ e.note or '' }}</td>
+              <td>
+                {% if e.images %}
+                  {% for img in e.images %}
+                    <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                  {% endfor %}
+                {% else %}-{% endif %}
+              </td>
               <td>{{ fmt(e.minutes) }}</td>
               <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
               <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
@@ -454,6 +651,69 @@ def dashboard():
       </div>
     </div>
   </div>
+
+<script>
+function limitFiles(input, max){
+  if (!input || !input.files) return;
+  if (input.files.length > max) {
+    alert('Możesz dodać maksymalnie ' + max + ' zdjęć do jednego wpisu.');
+    input.value = '';
+  }
+}
+
+function wireUploadProgress(formId, progressId, barId, textId){
+  const form = document.getElementById(formId);
+  if (!form) return;
+
+  form.addEventListener('submit', function(e){
+    // jeśli brak plików, nie ma sensu AJAXować (szybszy normalny submit)
+    const fileInput = form.querySelector('input[type="file"][name="images"]');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      return; // normalny submit
+    }
+
+    e.preventDefault();
+
+    const progressBox = document.getElementById(progressId);
+    const bar = document.getElementById(barId);
+    const text = document.getElementById(textId);
+
+    progressBox.style.display = 'block';
+    bar.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    if (text) text.textContent = '0%';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', form.getAttribute('action') || window.location.href);
+
+    xhr.upload.onprogress = function(evt){
+      if (evt.lengthComputable) {
+        const percent = Math.round((evt.loaded / evt.total) * 100);
+        bar.style.width = percent + '%';
+        bar.setAttribute('aria-valuenow', String(percent));
+        if (text) text.textContent = percent + '%';
+      }
+    };
+
+    xhr.onload = function(){
+      // Po udanym zapisie, odświeżamy stronę (żeby pokazać flash i nowy wpis)
+      window.location.reload();
+    };
+
+    xhr.onerror = function(){
+      alert('Błąd podczas wysyłania. Spróbuj ponownie.');
+      progressBox.style.display = 'none';
+    };
+
+    xhr.send(new FormData(form));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  wireUploadProgress('entryForm','uploadProgress','uploadBar','uploadText');
+  wireUploadProgress('adminEntryForm','uploadProgressAdmin','uploadBarAdmin','uploadTextAdmin');
+});
+</script>
 </div>
 """, projects=projects, entries=entries, fmt=fmt_hhmm, m_from=m_from, m_to=m_to, tot=tot, tot_extra=tot_extra, tot_ot=tot_ot, date=date)
     return layout("Panel", body)
@@ -483,7 +743,7 @@ def edit_entry(entry_id):
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Edytuj wpis</h5>
-  <form class="row g-2" method="post">
+  <form id="adminEntryForm" class="row g-2" method="post" enctype="multipart/form-data">
     <div class="col-md-3">
       <label class="form-label">Data</label>
       <input class="form-control" type="date" name="work_date" value="{{ e.work_date.isoformat() }}" required>
@@ -530,10 +790,26 @@ def delete_entry(entry_id):
     e = Entry.query.get_or_404(entry_id)
     if not (current_user.is_admin or e.user_id == current_user.id):
         abort(403)
+    _delete_entry_images_files(e)
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
     return redirect(url_for("dashboard" if not current_user.is_admin else "admin_entries"))
+
+
+@app.route("/image/<int:image_id>")
+@login_required
+def entry_image_view(image_id):
+    img = EntryImage.query.get_or_404(image_id)
+    e = Entry.query.get(img.entry_id)
+    if not e:
+        abort(404)
+    if not (current_user.is_admin or e.user_id == current_user.id):
+        abort(403)
+    path = os.path.join(UPLOAD_DIR, img.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path)
 
 
 # --- Admin: overview (monthly totals) ---
@@ -739,7 +1015,7 @@ def admin_user_edit(uid):
   </form>
 
   <h6>Reset hasła</h6>
-  <form class="row g-2" method="post">
+  <form class="row g-2" method="post" enctype="multipart/form-data">
     <input type="hidden" name="action" value="set_password">
     <div class="col-md-4"><input class="form-control" type="text" name="password" placeholder="Nowe hasło"></div>
     <div class="col-md-2"><button class="btn btn-outline-primary">Ustaw hasło</button></div>
@@ -868,12 +1144,21 @@ def admin_entries():
         is_extra = bool(request.form.get("is_extra"))
         is_ot = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
+        images_files = request.files.getlist("images")
 
-        db.session.add(Entry(
+        e = Entry(
             user_id=uid, project_id=pid, work_date=work_date,
             minutes=minutes, is_extra=is_extra, is_overtime=is_ot, note=note
-        ))
+        )
+        db.session.add(e)
         db.session.commit()
+
+        # zapis zdjęć (opcjonalnie)
+        try:
+            _save_entry_images(e, images_files)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         flash("Dodano wpis.")
         return redirect(url_for("admin_entries"))
 
@@ -903,7 +1188,7 @@ def admin_entries():
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Dodaj godziny (admin)</h5>
-  <form class="row g-2" method="post">
+  <form class="row g-2" method="post" enctype="multipart/form-data">
     <div class="col-md-3">
       <label class="form-label">Pracownik</label>
       <select class="form-select" name="user_id" required>
@@ -939,6 +1224,11 @@ def admin_entries():
       <input class="form-control" type="text" name="note" placeholder="opcjonalnie">
     </div>
     <div class="col-12">
+      <label class="form-label">Zdjęcia</label>
+      <input id="adminImagesInput" class="form-control" type="file" name="images" accept="image/*" multiple onchange="limitFiles(this,5)">
+      <div class="form-text">Opcjonalne zdjęcia do wpisu (maksymalnie 5).</div>
+    </div>
+    <div class="col-12">
       <button class="btn btn-primary">Zapisz</button>
     </div>
   </form>
@@ -967,7 +1257,7 @@ def admin_entries():
   <div class="table-responsive mt-3">
     <table class="table table-sm align-middle">
       <thead>
-        <tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Notatka</th><th>Godziny</th><th>Extra</th><th>OT</th><th></th></tr>
+        <tr><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Notatka</th><th>Zdjęcia</th><th>Godziny</th><th>Extra</th><th>OT</th><th></th></tr>
       </thead>
       <tbody>
         {% for e in entries %}
@@ -976,6 +1266,13 @@ def admin_entries():
           <td>{{ e.user.name }}</td>
           <td>{{ e.project.name }}</td>
           <td>{{ e.note or '' }}</td>
+          <td>
+            {% if e.images %}
+              {% for img in e.images %}
+                <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+              {% endfor %}
+            {% else %}-{% endif %}
+          </td>
           <td>{{ fmt(e.minutes) }}</td>
           <td>{% if e.is_extra %}✔{% else %}-{% endif %}</td>
           <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
@@ -997,6 +1294,69 @@ def admin_entries():
     <span class="me-3">Nadgodziny: <strong>{{ fmt(tot_ot) }}</strong></span>
   </div>
 </div>
+
+<script>
+function limitFiles(input, max){
+  if (!input || !input.files) return;
+  if (input.files.length > max) {
+    alert('Możesz dodać maksymalnie ' + max + ' zdjęć do jednego wpisu.');
+    input.value = '';
+  }
+}
+
+function wireUploadProgress(formId, progressId, barId, textId){
+  const form = document.getElementById(formId);
+  if (!form) return;
+
+  form.addEventListener('submit', function(e){
+    // jeśli brak plików, nie ma sensu AJAXować (szybszy normalny submit)
+    const fileInput = form.querySelector('input[type="file"][name="images"]');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      return; // normalny submit
+    }
+
+    e.preventDefault();
+
+    const progressBox = document.getElementById(progressId);
+    const bar = document.getElementById(barId);
+    const text = document.getElementById(textId);
+
+    progressBox.style.display = 'block';
+    bar.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    if (text) text.textContent = '0%';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', form.getAttribute('action') || window.location.href);
+
+    xhr.upload.onprogress = function(evt){
+      if (evt.lengthComputable) {
+        const percent = Math.round((evt.loaded / evt.total) * 100);
+        bar.style.width = percent + '%';
+        bar.setAttribute('aria-valuenow', String(percent));
+        if (text) text.textContent = percent + '%';
+      }
+    };
+
+    xhr.onload = function(){
+      // Po udanym zapisie, odświeżamy stronę (żeby pokazać flash i nowy wpis)
+      window.location.reload();
+    };
+
+    xhr.onerror = function(){
+      alert('Błąd podczas wysyłania. Spróbuj ponownie.');
+      progressBox.style.display = 'none';
+    };
+
+    xhr.send(new FormData(form));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  wireUploadProgress('entryForm','uploadProgress','uploadBar','uploadText');
+  wireUploadProgress('adminEntryForm','uploadProgressAdmin','uploadBarAdmin','uploadTextAdmin');
+});
+</script>
 """, users=users, projects=projects, entries=entries, fmt=fmt_hhmm,
        ym=ym, selected_uid=selected_uid, tot=tot, tot_ex=tot_ex, tot_ot=tot_ot, date=date)
     return layout("Godziny (admin)", body)
@@ -1073,6 +1433,7 @@ def admin_entry_edit(entry_id):
 def admin_entry_delete(entry_id):
     require_admin()
     e = Entry.query.get_or_404(entry_id)
+    _delete_entry_images_files(e)
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
@@ -1080,61 +1441,37 @@ def admin_entry_delete(entry_id):
 
 
 # --- Backup / Restore ---
+def _add_uploads_to_zip(z: zipfile.ZipFile):
+    """Dodaje folder uploads do archiwum. Wspiera przywracanie zdjęć."""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # marker, żeby folder istniał nawet gdy nie ma zdjęć
+    keep_path = os.path.join(UPLOAD_DIR, ".keep")
+    if not os.path.exists(keep_path):
+        try:
+            open(keep_path, "a").close()
+        except Exception:
+            pass
+    for root, _, files in os.walk(UPLOAD_DIR):
+        for fn in files:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, UPLOAD_DIR)
+            arc = os.path.join("uploads", rel).replace("\\", "/")
+            try:
+                z.write(full, arcname=arc)
+            except Exception:
+                pass
+
 def _make_zip_bytes(path)->bytes:
     ensure_db_file()
     if not os.path.exists(path):
         open(path, "a").close()
         ensure_db_file()
-
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
-        # Baza
         z.write(path, arcname="app.db")
-
-        # Zdjecia
-        if os.path.exists(UPLOAD_DIR):
-            for root, _, files in os.walk(UPLOAD_DIR):
-                for fn in files:
-                    full = os.path.join(root, fn)
-                    rel = os.path.relpath(full, UPLOAD_DIR)
-                    z.write(full, arcname=os.path.join("uploads", rel))
-
+        _add_uploads_to_zip(z)
     mem.seek(0)
     return mem.read()
-
-
-def _restore_uploads_from_zipfileobj(fileobj) -> int:
-    """Przywraca folder uploads/ z archiwum ZIP do UPLOAD_DIR.
-
-    Oczekuje, ze w ZIP sa pliki pod sciezka uploads/... (tak jak w Twoich backupach).
-    Zwraca liczbe przywroconych plikow.
-    """
-    try:
-        fileobj.seek(0)
-    except Exception:
-        pass
-
-    with zipfile.ZipFile(fileobj, 'r') as z:
-        names = z.namelist()
-        members = [n for n in names if n.startswith('uploads/') and not n.endswith('/')]
-        if not members:
-            return 0
-
-        # Wymieniamy caly folder uploads, zeby nie mieszac starych plikow
-        if os.path.exists(UPLOAD_DIR):
-            shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-        restored = 0
-        for name in members:
-            rel = name[len('uploads/'):]
-            target = os.path.join(UPLOAD_DIR, rel)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with z.open(name) as srcf, open(target, 'wb') as dstf:
-                shutil.copyfileobj(srcf, dstf, length=1024 * 1024)
-            restored += 1
-
-        return restored
 
 def _replace_db_from_zipfileobj(fileobj):
     """Podmienia plik bazy danymi z archiwum ZIP (app.db w środku).
@@ -1163,12 +1500,36 @@ def _replace_db_from_zipfileobj(fileobj):
     except Exception:
         pass
 
-    # Nadpisanie pliku bazy danymi z kopii zapasowej
+    # Nadpisanie pliku bazy danymi z kopii zapasowej + odtworzenie zdjęć
     with zipfile.ZipFile(fileobj, "r") as z:
-        if "app.db" not in z.namelist():
+        names = z.namelist()
+        if "app.db" not in names:
             raise RuntimeError("Brak pliku 'app.db' w archiwum.")
         with z.open("app.db") as src, open(target_path, "wb") as dst:
             shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+        # Zdjęcia: folder uploads/*
+        upload_names = [n for n in names if n.startswith("uploads/")]
+        # Czyścimy lokalny folder i odtwarzamy z backupu
+        try:
+            if os.path.exists(UPLOAD_DIR):
+                shutil.rmtree(UPLOAD_DIR)
+        except Exception:
+            pass
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        for n in upload_names:
+            if n.endswith("/"):
+                continue
+            rel = n[len("uploads/"):]
+            if not rel or rel == ".keep":
+                continue
+            out_path = os.path.join(UPLOAD_DIR, rel)
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            try:
+                with z.open(n) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+            except Exception:
+                pass
 
     # Odtworzenie struktury (jeśli trzeba), bez kasowania danych
     ensure_db_file()
@@ -1259,13 +1620,7 @@ def admin_backup_create_save():
             open(DB_FILE, "a").close()
             ensure_db_file()
         z.write(DB_FILE, arcname="app.db")
-        # Zdjecia
-        if os.path.exists(UPLOAD_DIR):
-            for root, _, files in os.walk(UPLOAD_DIR):
-                for fn in files:
-                    full = os.path.join(root, fn)
-                    rel = os.path.relpath(full, UPLOAD_DIR)
-                    z.write(full, arcname=os.path.join('uploads', rel))
+        _add_uploads_to_zip(z)
     flash(f"Zapisano: {os.path.basename(zip_path)}")
     return redirect(url_for("admin_backup"))
 
@@ -1335,12 +1690,11 @@ def admin_backup_restore():
     try:
         mem = io.BytesIO(f.read())
         _replace_db_from_zipfileobj(mem)
-        restored = _restore_uploads_from_zipfileobj(mem)
         # Statystyki po przywróceniu – żeby było widać, że dane są
         users = User.query.count()
         projects = Project.query.count()
         entries = Entry.query.count()
-        flash(f"Przywrócono bazę i zdjęcia. Pliki zdjęć: {restored}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
+        flash(f"Przywrócono bazę z załączonego pliku. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -1357,12 +1711,11 @@ def admin_backup_restore_saved(fname):
     try:
         with open(path, "rb") as fp:
             _replace_db_from_zipfileobj(fp)
-            restored = _restore_uploads_from_zipfileobj(fp)
         # Statystyki po przywróceniu – żeby było widać, że dane są
         users = User.query.count()
         projects = Project.query.count()
         entries = Entry.query.count()
-        flash(f"Przywrócono bazę i zdjęcia z {fname}. Pliki zdjęć: {restored}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
+        flash(f"Przywrócono bazę z {fname}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -2584,7 +2937,7 @@ def leaves():
 def admin_leaves_export_xlsx():
     require_admin()
     rows = (
-        LeaveRequest.query.join(User)
+        LeaveRequest.query.join(User, LeaveRequest.user_id == User.id)
         .order_by(LeaveRequest.created_at.desc())
         .all()
     )
@@ -2624,7 +2977,7 @@ def admin_leaves_export_xlsx():
 def admin_leaves_print():
     require_admin()
     rows = (
-        LeaveRequest.query.join(User)
+        LeaveRequest.query.join(User, LeaveRequest.user_id == User.id)
         .order_by(LeaveRequest.created_at.desc())
         .all()
     )
