@@ -183,7 +183,8 @@ def ensure_db_file():
             pass
 
 
-ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+# Telefony (szczególnie iPhone) często wysyłają zdjęcia jako HEIC/HEIF.
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
 
 
 def _safe_image_filename(original_name: str, entry_id: int) -> str:
@@ -1016,7 +1017,7 @@ def admin_entries():
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Dodaj godziny (admin)</h5>
-  <form class="row g-2" method="post">
+  <form class="row g-2" method="post" enctype="multipart/form-data">
     <div class="col-md-3">
       <label class="form-label">Pracownik</label>
       <select class="form-select" name="user_id" required>
