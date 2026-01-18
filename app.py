@@ -479,6 +479,18 @@ def dashboard():
         note = request.form.get("note") or ""
         images_files = request.files.getlist("images")
 
+
+        valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
+        if len(valid_images) > 5:
+            flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
+            return redirect(url_for('admin_entries'))
+
+
+        valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
+        if len(valid_images) > 5:
+            flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
+            return redirect(url_for('dashboard'))
+
         # Konwersja daty z formularza
         try:
             work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
@@ -538,7 +550,7 @@ def dashboard():
   <div class="col-12">
     <div class="card p-3">
       <h5 class="mb-3">Dodaj godziny</h5>
-      <form class="row g-2" method="post" enctype="multipart/form-data">
+      <form id="entryForm" class="row g-2" method="post" enctype="multipart/form-data">
         <div class="col-md-3">
           <label class="form-label">Data</label>
           <input class="form-control" type="date" name="work_date" value="{{ date.today().isoformat() }}" required>
@@ -571,9 +583,23 @@ def dashboard():
         </div>
         <div class="col-md-12">
           <label class="form-label">Zdjęcia</label>
-          <input class="form-control" type="file" name="images" accept="image/*" multiple>
-          <div class="form-text">Możesz dodać jedno lub więcej zdjęć (z galerii albo z aparatu).</div>
+          <input id="imagesInput" class="form-control" type="file" name="images" accept="image/*" multiple onchange="limitFiles(this,5)">
+          <div class="form-text">Możesz dodać maksymalnie 5 zdjęć (z galerii albo z aparatu).</div>
         </div>
+
+    <div id="uploadProgress" class="col-12" style="display:none;">
+      <div class="progress">
+        <div id="uploadBar" class="progress-bar" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <div class="small text-muted mt-1" id="uploadText">0%</div>
+    </div>
+
+    <div id="uploadProgressAdmin" class="col-12" style="display:none;">
+      <div class="progress">
+        <div id="uploadBarAdmin" class="progress-bar" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <div class="small text-muted mt-1" id="uploadTextAdmin">0%</div>
+    </div>
         <div class="col-12">
           <button class="btn btn-primary">Zapisz</button>
         </div>
@@ -625,6 +651,69 @@ def dashboard():
       </div>
     </div>
   </div>
+
+<script>
+function limitFiles(input, max){
+  if (!input || !input.files) return;
+  if (input.files.length > max) {
+    alert('Możesz dodać maksymalnie ' + max + ' zdjęć do jednego wpisu.');
+    input.value = '';
+  }
+}
+
+function wireUploadProgress(formId, progressId, barId, textId){
+  const form = document.getElementById(formId);
+  if (!form) return;
+
+  form.addEventListener('submit', function(e){
+    // jeśli brak plików, nie ma sensu AJAXować (szybszy normalny submit)
+    const fileInput = form.querySelector('input[type="file"][name="images"]');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      return; // normalny submit
+    }
+
+    e.preventDefault();
+
+    const progressBox = document.getElementById(progressId);
+    const bar = document.getElementById(barId);
+    const text = document.getElementById(textId);
+
+    progressBox.style.display = 'block';
+    bar.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    if (text) text.textContent = '0%';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', form.getAttribute('action') || window.location.href);
+
+    xhr.upload.onprogress = function(evt){
+      if (evt.lengthComputable) {
+        const percent = Math.round((evt.loaded / evt.total) * 100);
+        bar.style.width = percent + '%';
+        bar.setAttribute('aria-valuenow', String(percent));
+        if (text) text.textContent = percent + '%';
+      }
+    };
+
+    xhr.onload = function(){
+      // Po udanym zapisie, odświeżamy stronę (żeby pokazać flash i nowy wpis)
+      window.location.reload();
+    };
+
+    xhr.onerror = function(){
+      alert('Błąd podczas wysyłania. Spróbuj ponownie.');
+      progressBox.style.display = 'none';
+    };
+
+    xhr.send(new FormData(form));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  wireUploadProgress('entryForm','uploadProgress','uploadBar','uploadText');
+  wireUploadProgress('adminEntryForm','uploadProgressAdmin','uploadBarAdmin','uploadTextAdmin');
+});
+</script>
 </div>
 """, projects=projects, entries=entries, fmt=fmt_hhmm, m_from=m_from, m_to=m_to, tot=tot, tot_extra=tot_extra, tot_ot=tot_ot, date=date)
     return layout("Panel", body)
@@ -654,7 +743,7 @@ def edit_entry(entry_id):
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Edytuj wpis</h5>
-  <form class="row g-2" method="post" enctype="multipart/form-data">
+  <form id="adminEntryForm" class="row g-2" method="post" enctype="multipart/form-data">
     <div class="col-md-3">
       <label class="form-label">Data</label>
       <input class="form-control" type="date" name="work_date" value="{{ e.work_date.isoformat() }}" required>
@@ -1136,8 +1225,8 @@ def admin_entries():
     </div>
     <div class="col-12">
       <label class="form-label">Zdjęcia</label>
-      <input class="form-control" type="file" name="images" accept="image/*" multiple>
-      <div class="form-text">Opcjonalne zdjęcia do wpisu.</div>
+      <input id="adminImagesInput" class="form-control" type="file" name="images" accept="image/*" multiple onchange="limitFiles(this,5)">
+      <div class="form-text">Opcjonalne zdjęcia do wpisu (maksymalnie 5).</div>
     </div>
     <div class="col-12">
       <button class="btn btn-primary">Zapisz</button>
@@ -1205,6 +1294,69 @@ def admin_entries():
     <span class="me-3">Nadgodziny: <strong>{{ fmt(tot_ot) }}</strong></span>
   </div>
 </div>
+
+<script>
+function limitFiles(input, max){
+  if (!input || !input.files) return;
+  if (input.files.length > max) {
+    alert('Możesz dodać maksymalnie ' + max + ' zdjęć do jednego wpisu.');
+    input.value = '';
+  }
+}
+
+function wireUploadProgress(formId, progressId, barId, textId){
+  const form = document.getElementById(formId);
+  if (!form) return;
+
+  form.addEventListener('submit', function(e){
+    // jeśli brak plików, nie ma sensu AJAXować (szybszy normalny submit)
+    const fileInput = form.querySelector('input[type="file"][name="images"]');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      return; // normalny submit
+    }
+
+    e.preventDefault();
+
+    const progressBox = document.getElementById(progressId);
+    const bar = document.getElementById(barId);
+    const text = document.getElementById(textId);
+
+    progressBox.style.display = 'block';
+    bar.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    if (text) text.textContent = '0%';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', form.getAttribute('action') || window.location.href);
+
+    xhr.upload.onprogress = function(evt){
+      if (evt.lengthComputable) {
+        const percent = Math.round((evt.loaded / evt.total) * 100);
+        bar.style.width = percent + '%';
+        bar.setAttribute('aria-valuenow', String(percent));
+        if (text) text.textContent = percent + '%';
+      }
+    };
+
+    xhr.onload = function(){
+      // Po udanym zapisie, odświeżamy stronę (żeby pokazać flash i nowy wpis)
+      window.location.reload();
+    };
+
+    xhr.onerror = function(){
+      alert('Błąd podczas wysyłania. Spróbuj ponownie.');
+      progressBox.style.display = 'none';
+    };
+
+    xhr.send(new FormData(form));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  wireUploadProgress('entryForm','uploadProgress','uploadBar','uploadText');
+  wireUploadProgress('adminEntryForm','uploadProgressAdmin','uploadBarAdmin','uploadTextAdmin');
+});
+</script>
 """, users=users, projects=projects, entries=entries, fmt=fmt_hhmm,
        ym=ym, selected_uid=selected_uid, tot=tot, tot_ex=tot_ex, tot_ot=tot_ot, date=date)
     return layout("Godziny (admin)", body)
