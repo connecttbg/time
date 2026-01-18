@@ -19,6 +19,11 @@ from sqlalchemy import text as sql_text, and_
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_FILE = os.path.join(BASE_DIR, "app.db")
 
+# Folder na zdjecia (pliki fizyczne). Trzymamy go obok bazy,
+# zeby backup/restore byly proste.
+UPLOAD_DIR = os.path.join(os.path.dirname(DB_FILE) or '.', 'uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-me")
 
@@ -1080,11 +1085,56 @@ def _make_zip_bytes(path)->bytes:
     if not os.path.exists(path):
         open(path, "a").close()
         ensure_db_file()
+
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
+        # Baza
         z.write(path, arcname="app.db")
+
+        # Zdjecia
+        if os.path.exists(UPLOAD_DIR):
+            for root, _, files in os.walk(UPLOAD_DIR):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, UPLOAD_DIR)
+                    z.write(full, arcname=os.path.join("uploads", rel))
+
     mem.seek(0)
     return mem.read()
+
+
+def _restore_uploads_from_zipfileobj(fileobj) -> int:
+    """Przywraca folder uploads/ z archiwum ZIP do UPLOAD_DIR.
+
+    Oczekuje, ze w ZIP sa pliki pod sciezka uploads/... (tak jak w Twoich backupach).
+    Zwraca liczbe przywroconych plikow.
+    """
+    try:
+        fileobj.seek(0)
+    except Exception:
+        pass
+
+    with zipfile.ZipFile(fileobj, 'r') as z:
+        names = z.namelist()
+        members = [n for n in names if n.startswith('uploads/') and not n.endswith('/')]
+        if not members:
+            return 0
+
+        # Wymieniamy caly folder uploads, zeby nie mieszac starych plikow
+        if os.path.exists(UPLOAD_DIR):
+            shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+        restored = 0
+        for name in members:
+            rel = name[len('uploads/'):]
+            target = os.path.join(UPLOAD_DIR, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(name) as srcf, open(target, 'wb') as dstf:
+                shutil.copyfileobj(srcf, dstf, length=1024 * 1024)
+            restored += 1
+
+        return restored
 
 def _replace_db_from_zipfileobj(fileobj):
     """Podmienia plik bazy danymi z archiwum ZIP (app.db w środku).
@@ -1209,6 +1259,13 @@ def admin_backup_create_save():
             open(DB_FILE, "a").close()
             ensure_db_file()
         z.write(DB_FILE, arcname="app.db")
+        # Zdjecia
+        if os.path.exists(UPLOAD_DIR):
+            for root, _, files in os.walk(UPLOAD_DIR):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, UPLOAD_DIR)
+                    z.write(full, arcname=os.path.join('uploads', rel))
     flash(f"Zapisano: {os.path.basename(zip_path)}")
     return redirect(url_for("admin_backup"))
 
@@ -1278,11 +1335,12 @@ def admin_backup_restore():
     try:
         mem = io.BytesIO(f.read())
         _replace_db_from_zipfileobj(mem)
+        restored = _restore_uploads_from_zipfileobj(mem)
         # Statystyki po przywróceniu – żeby było widać, że dane są
         users = User.query.count()
         projects = Project.query.count()
         entries = Entry.query.count()
-        flash(f"Przywrócono bazę z załączonego pliku. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
+        flash(f"Przywrócono bazę i zdjęcia. Pliki zdjęć: {restored}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -1299,11 +1357,12 @@ def admin_backup_restore_saved(fname):
     try:
         with open(path, "rb") as fp:
             _replace_db_from_zipfileobj(fp)
+            restored = _restore_uploads_from_zipfileobj(fp)
         # Statystyki po przywróceniu – żeby było widać, że dane są
         users = User.query.count()
         projects = Project.query.count()
         entries = Entry.query.count()
-        flash(f"Przywrócono bazę z {fname}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
+        flash(f"Przywrócono bazę i zdjęcia z {fname}. Pliki zdjęć: {restored}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -2525,7 +2584,7 @@ def leaves():
 def admin_leaves_export_xlsx():
     require_admin()
     rows = (
-        LeaveRequest.query.join(User, LeaveRequest.user_id == User.id)
+        LeaveRequest.query.join(User)
         .order_by(LeaveRequest.created_at.desc())
         .all()
     )
@@ -2565,7 +2624,7 @@ def admin_leaves_export_xlsx():
 def admin_leaves_print():
     require_admin()
     rows = (
-        LeaveRequest.query.join(User, LeaveRequest.user_id == User.id)
+        LeaveRequest.query.join(User)
         .order_by(LeaveRequest.created_at.desc())
         .all()
     )
