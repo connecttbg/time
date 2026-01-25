@@ -365,6 +365,16 @@ BASE = """
     .brand-big{ max-width:180px; display:block; margin:0 auto 16px; }
     a{ color:#2563eb; }
     .container-narrow{ max-width:1100px; }
+  
+    @media (max-width: 576px){
+      /* większe tap-targety i brak iOS zoom w polach */
+      .btn{ min-height:44px; padding-top:.6rem; padding-bottom:.6rem; }
+      .btn-sm{ min-height:44px; padding-top:.55rem; padding-bottom:.55rem; font-size:0.95rem; }
+      .form-control,.form-select{ font-size:16px; min-height:44px; }
+      .navbar .nav-link{ padding:.5rem 0; }
+      .table{ display:block; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; }
+    }
+
   </style>
 </head>
 <body>
@@ -372,24 +382,36 @@ BASE = """
   <div class="container-fluid">
     <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') if current_user.is_authenticated else url_for('login') }}">
       <img src="{{ url_for('static', filename='ekko_logo.png') }}" class="brand-logo me-2" alt="logo">
-      
     </a>
+
     {% if current_user.is_authenticated %}
-    <div class="ms-auto d-flex align-items-center gap-2">
-      {% if current_user.is_admin %}
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_overview') }}">Admin</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_users') }}">Pracownicy</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_projects') }}">Projekty</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_entries') }}">Godziny (admin)</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_costs') }}">Koszty (admin)</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_reports') }}">Raport</a>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_backup') }}">Kopie</a>
-      {% endif %}
-      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('leaves') }}">Urlopy</a>
-      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('user_costs') }}">Koszty</a>
-      <a class="badge badge-soft px-3 py-2 text-decoration-none" href="{{ url_for('user_summary') }}">{{ current_user.name }}</a>
-      <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
-    </div>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu" aria-controls="navMenu" aria-expanded="false" aria-label="Menu">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navMenu">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          {% if current_user.is_admin %}
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_overview') }}">Admin</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Pracownicy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_hours') }}">Godziny (admin)</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_leave_requests') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
+          {% else %}
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('leave_requests') }}">Urlopy</a></li>
+          {% endif %}
+        </ul>
+
+        <div class="d-flex flex-column flex-lg-row gap-2 align-items-start align-items-lg-center">
+          <span class="text-muted small">{{ current_user.name }}</span>
+          <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
+        </div>
+      </div>
     {% endif %}
   </div>
 </nav>
@@ -404,6 +426,7 @@ BASE = """
 </div>
 
 <div class="text-center mt-4 text-muted" style="font-size:12px;">aplikacja utworzona przez dataconnect.no</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 """
