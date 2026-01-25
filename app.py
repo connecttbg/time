@@ -397,13 +397,13 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_leave_requests') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
           {% else %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('leave_requests') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
           {% endif %}
         </ul>
 
