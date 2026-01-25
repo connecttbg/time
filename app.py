@@ -395,7 +395,7 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_overview') }}">Admin</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Pracownicy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_hours') }}">Godziny (admin)</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_leave_requests') }}">Urlopy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
