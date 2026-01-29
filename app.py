@@ -45,6 +45,14 @@ DB_FILE = os.path.join(DATA_DIR, "app.db")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 
 
+# Plany (PDF) przypięte do projektów
+PLANS_DIR = os.path.join(DATA_DIR, "plans")
+ALLOWED_PLAN_EXTS = {".pdf"}
+MAX_PLAN_MB = int(os.getenv("MAX_PLAN_MB", "25"))
+MAX_PLAN_BYTES = MAX_PLAN_MB * 1024 * 1024
+
+
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-me")
 
@@ -80,6 +88,21 @@ class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200), nullable=False, unique=True)
     is_active = db.Column(db.Boolean, default=True)
+
+
+class Plan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+    title = db.Column(db.String(200), nullable=True)
+
+    stored_filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
+    project = db.relationship("Project", backref="plans")
+    uploaded_by_user = db.relationship("User", foreign_keys=[uploaded_by])
 
 
 class Entry(db.Model):
@@ -196,6 +219,7 @@ def require_admin():
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(PLANS_DIR, exist_ok=True)
     with app.app_context():
         db.create_all()
         try:
@@ -263,13 +287,19 @@ def _safe_image_filename(original_name: str, entry_id: int) -> str:
     return f"e{entry_id}_{uuid.uuid4().hex}.jpg"
 
 
+def _safe_plan_filename(original_name: str, project_id: int) -> str:
+    # zapisujemy zawsze jako pdf; unikalna nazwa na dysku
+    return f"p{project_id}_{uuid.uuid4().hex}.pdf"
+
+
+
 def _save_entry_images(entry, files):
     """Zapisuje zdjęcia do UPLOAD_DIR i tworzy rekordy w bazie."""
     if not files:
         return
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     for f in files:
-        if not f or not getattr(f, "filename", ""):
+        if not files or not any(getattr(x, "filename", "") for x in files):
             continue
         name = f.filename
         _, ext = os.path.splitext(name)
@@ -395,16 +425,20 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_overview') }}">Admin</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Pracownicy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for(\'admin_plans\') }}">Plany (PDF)</a></li>
+<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_plans') }}">Plany</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
           {% else %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_costs') }}">Koszty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
           {% endif %}
         </ul>
 
@@ -741,6 +775,275 @@ document.addEventListener('DOMContentLoaded', function(){
 </div>
 """, projects=projects, entries=entries, fmt=fmt_hhmm, m_from=m_from, m_to=m_to, tot=tot, tot_extra=tot_extra, tot_ot=tot_ot, date=date)
     return layout("Panel", body)
+
+
+# --- Plany (PDF) ---
+@app.route("/plans", methods=["GET"])
+@login_required
+def plans():
+    # Lista planów, z filtrem po projekcie
+    projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+    selected_pid = request.args.get("project_id", "all")
+
+    q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
+    if selected_pid != "all":
+        try:
+            q = q.filter(Plan.project_id == int(selected_pid))
+        except Exception:
+            selected_pid = "all"
+
+    rows = q.all()
+
+    body = render_template_string("""
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h5 class="mb-0">Plany (PDF)</h5>
+  </div>
+
+  <form class="row g-2 align-items-end mb-3" method="get">
+    <div class="col-md-5">
+      <label class="form-label">Projekt</label>
+      <select class="form-select" name="project_id">
+        <option value="all" {% if selected_pid == 'all' %}selected{% endif %}>Wszystkie projekty</option>
+        {% for p in projects %}
+          <option value="{{ p.id }}" {% if selected_pid|int == p.id %}selected{% endif %}>{{ p.name }}{% if not p.is_active %} (nieaktywny){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-outline-primary w-100">Filtruj</button>
+    </div>
+  </form>
+
+  <div class="table-responsive">
+    <table class="table table-sm align-middle">
+      <thead>
+        <tr>
+          <th>Projekt</th>
+          <th>Tytuł</th>
+          <th>Dodano</th>
+          <th class="text-end">PDF</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pl in rows %}
+          <tr>
+            <td>{{ pl.project.name }}</td>
+            <td>{{ pl.title or (pl.original_filename or 'Plan') }}</td>
+            <td>{{ pl.uploaded_at.strftime("%Y-%m-%d %H:%M") if pl.uploaded_at else '' }}</td>
+            <td class="text-end">
+              <a class="btn btn-sm btn-outline-primary" target="_blank" rel="noopener"
+                 href="{{ url_for('plan_view', plan_id=pl.id) }}">Otwórz</a>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="text-muted">Brak planów.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+""", projects=projects, rows=rows, selected_pid=selected_pid)
+
+    return layout("Plany", body)
+
+
+@app.route("/plans/<int:plan_id>/view", methods=["GET"])
+@login_required
+def plan_view(plan_id):
+    pl = Plan.query.get_or_404(plan_id)
+    path = os.path.join(PLANS_DIR, pl.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path, mimetype="application/pdf")
+
+
+@app.route("/admin/plans", methods=["GET", "POST"])
+@login_required
+def admin_plans():
+    require_admin()
+    os.makedirs(PLANS_DIR, exist_ok=True)
+
+    if request.method == "POST":
+        project_id = int(request.form.get("project_id"))
+        title = (request.form.get("title") or "").strip()
+        files = request.files.getlist("pdfs")
+
+        if not files or not any(getattr(x, "filename", "") for x in files):
+            flash("Wybierz plik PDF.")
+            return redirect(url_for("admin_plans"))
+
+        count_added = 0
+        for f in files:
+            if not f or not getattr(f, "filename", ""):
+                continue
+
+            name = secure_filename(f.filename)
+            _, ext = os.path.splitext(name)
+            ext = (ext or "").lower()
+            if ext not in ALLOWED_PLAN_EXTS:
+                continue
+
+            size = _file_size_bytes(f)
+            if size is not None and size > MAX_PLAN_BYTES:
+                continue
+
+            stored = _safe_plan_filename(name, project_id)
+            out_path = os.path.join(PLANS_DIR, stored)
+
+            try:
+                try:
+                    f.stream.seek(0)
+                except Exception:
+                    pass
+                f.save(out_path)
+            except Exception:
+                continue
+
+            db.session.add(Plan(
+                project_id=project_id,
+                title=title or None,
+                stored_filename=stored,
+                original_filename=name,
+                uploaded_by=current_user.id,
+            ))
+            count_added += 1
+
+        if count_added == 0:
+            flash("Nie dodano żadnego planu. Upewnij się, że wybierasz pliki PDF i mieszczą się w limicie.")
+            return redirect(url_for("admin_plans"))
+
+        db.session.commit()
+        flash(f"Dodano plany: {count_added}")
+        return redirect(url_for("admin_plans"))
+
+
+    projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+
+    selected_pid = request.args.get("project_id", "all")
+    q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
+    if selected_pid != "all":
+        try:
+            q = q.filter(Plan.project_id == int(selected_pid))
+        except Exception:
+            selected_pid = "all"
+
+    rows = q.all()
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Plany – dodaj PDF</h5>
+      <form class="row g-2" method="post" enctype="multipart/form-data">
+        <div class="col-md-4">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id" required>
+            {% for p in projects %}
+              <option value="{{ p.id }}">{{ p.name }}{% if not p.is_active %} (nieaktywny){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Tytuł (opcjonalnie)</label>
+          <input class="form-control" name="title" placeholder="np. Rysunki – wersja 2">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">PDF (możesz wybrać kilka)</label>
+          <input class="form-control" type="file" name="pdfs" accept="application/pdf" multiple required>
+          <div class="form-text">Maks {{ max_mb }} MB.</div>
+        </div>
+        <div class="col-12">
+          <button class="btn btn-primary">Dodaj</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="mb-0">Lista planów</h5>
+      </div>
+
+      <form class="row g-2 align-items-end mb-3" method="get">
+        <div class="col-md-5">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id">
+            <option value="all" {% if selected_pid == 'all' %}selected{% endif %}>Wszystkie projekty</option>
+            {% for p in projects %}
+              <option value="{{ p.id }}" {% if selected_pid|int == p.id %}selected{% endif %}>{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-outline-primary w-100">Filtruj</button>
+        </div>
+      </form>
+
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>Projekt</th>
+              <th>Tytuł</th>
+              <th>Plik</th>
+              <th>Dodano</th>
+              <th class="text-end">Akcje</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for pl in rows %}
+              <tr>
+                <td>{{ pl.project.name }}</td>
+                <td>{{ pl.title or '' }}</td>
+                <td>{{ pl.original_filename or pl.stored_filename }}</td>
+                <td>{{ pl.uploaded_at.strftime("%Y-%m-%d %H:%M") if pl.uploaded_at else '' }}</td>
+                <td class="text-end text-nowrap">
+                  <a class="btn btn-sm btn-outline-primary" target="_blank" rel="noopener"
+                     href="{{ url_for('plan_view', plan_id=pl.id) }}">Otwórz</a>
+                  <form class="d-inline" method="post" action="{{ url_for('admin_plan_delete', plan_id=pl.id) }}"
+                        onsubmit="return confirm('Usunąć plan?')">
+                    <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5" class="text-muted">Brak planów.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div>
+""", projects=projects, rows=rows, selected_pid=selected_pid, max_mb=MAX_PLAN_MB)
+
+    return layout("Plany (admin)", body)
+
+
+@app.route("/admin/plans/<int:plan_id>/delete", methods=["POST"])
+@login_required
+def admin_plan_delete(plan_id):
+    require_admin()
+    pl = Plan.query.get_or_404(plan_id)
+
+    # usuń plik
+    try:
+        path = os.path.join(PLANS_DIR, pl.stored_filename)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+    db.session.delete(pl)
+    db.session.commit()
+    flash("Usunięto plan.")
+    return redirect(url_for("admin_plans"))
+
+
+
 
 
 # --- Edit/Delete entries (user & admin) ---
@@ -1485,6 +1788,28 @@ def _add_uploads_to_zip(z: zipfile.ZipFile):
             except Exception:
                 pass
 
+def _add_plans_to_zip(z: zipfile.ZipFile):
+    """Dodaje folder plans (PDF) do archiwum backupu."""
+    os.makedirs(PLANS_DIR, exist_ok=True)
+
+    # marker, żeby folder istniał nawet gdy nie ma PDF
+    keep_path = os.path.join(PLANS_DIR, ".keep")
+    if not os.path.exists(keep_path):
+        try:
+            open(keep_path, "a").close()
+        except Exception:
+            pass
+
+    for root, _, files in os.walk(PLANS_DIR):
+        for fn in files:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, PLANS_DIR)
+            arc = os.path.join("plans", rel).replace("\\", "/")
+            try:
+                z.write(full, arcname=arc)
+            except Exception:
+                pass
+
 def _make_zip_bytes(path)->bytes:
     ensure_db_file()
     if not os.path.exists(path):
@@ -1494,6 +1819,7 @@ def _make_zip_bytes(path)->bytes:
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(path, arcname="app.db")
         _add_uploads_to_zip(z)
+        _add_plans_to_zip(z)
     mem.seek(0)
     return mem.read()
 
@@ -1555,7 +1881,32 @@ def _replace_db_from_zipfileobj(fileobj):
             except Exception:
                 pass
 
-    # Odtworzenie struktury (jeśli trzeba), bez kasowania danych
+    
+        # --- ODTWARZANIE PLANÓW PDF ---
+        plan_names = [n for n in names if n.startswith("plans/")]
+
+        try:
+            if os.path.exists(PLANS_DIR):
+                shutil.rmtree(PLANS_DIR)
+        except Exception:
+            pass
+
+        os.makedirs(PLANS_DIR, exist_ok=True)
+        for n in plan_names:
+            if n.endswith("/"):
+                continue
+            rel = n[len("plans/"):]
+            if not rel or rel == ".keep":
+                continue
+            out_path = os.path.join(PLANS_DIR, rel)
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            try:
+                with z.open(n) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+            except Exception:
+                pass
+
+# Odtworzenie struktury (jeśli trzeba), bez kasowania danych
     ensure_db_file()
 
 @app.route("/admin/backup", methods=["GET"])
@@ -1611,6 +1962,9 @@ def admin_backup():
           <span>
             <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_backup_download', fname=f) }}">Pobierz</a>
             <a class="btn btn-sm btn-outline-danger" href="{{ url_for('admin_backup_restore_saved', fname=f) }}" onclick="return confirm('Przywrócić z tej kopii?')">Przywróć</a>
+            <form class="d-inline ms-1" method="post" action="{{ url_for('admin_backup_delete', fname=f) }}" onsubmit="return confirm('Usunąć ten backup z serwera?')">
+              <button class="btn btn-sm btn-danger">Usuń</button>
+            </form>
           </span>
         </li>
       {% endfor %}
@@ -1702,6 +2056,32 @@ def admin_backup_download(fname):
     if not os.path.exists(path):
         abort(404)
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="application/zip")
+
+@app.route("/admin/backup/delete/<path:fname>", methods=["POST"])
+@login_required
+def admin_backup_delete(fname):
+    require_admin()
+    base = os.path.dirname(DB_FILE)
+    bdir = os.path.join(base, "backups") if base else "backups"
+    os.makedirs(bdir, exist_ok=True)
+
+    fname_only = os.path.basename(fname)
+    path = os.path.join(bdir, fname_only)
+
+    # zabezpieczenie: tylko pliki .zip w katalogu backups
+    if not path.endswith(".zip"):
+        abort(400)
+
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+            flash("Usunięto backup z serwera.")
+        except Exception as e:
+            flash(f"Nie udało się usunąć backupu: {e}")
+    else:
+        flash("Nie znaleziono takiego backupu.")
+    return redirect(url_for("admin_backup"))
+
 
 @app.route("/admin/backup/restore", methods=["POST"])
 @login_required
