@@ -244,6 +244,13 @@ class ExtraReport(db.Model):
         lazy="select",
     )
 
+    attachments = db.relationship(
+        "ExtraReportAttachment",
+        backref="report",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
 
 class ExtraReportItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -463,7 +470,6 @@ def init_db():
 
         db.session.commit()
 
-init_db()
 
 
 # --- Base layout (jasny) ---
@@ -646,13 +652,38 @@ class ExtraReportAttachment(db.Model):
     original_filename = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    report = db.relationship("ExtraReport", backref=db.backref("attachments", cascade="all, delete-orphan", lazy="select"))
 
+class ExtraReportAudit(db.Model):
+    __tablename__ = "extra_report_audit"
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, index=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    actor_type = db.Column(db.String(20), nullable=False)  # admin, public, system
+    actor_name = db.Column(db.String(120), nullable=True)
+    action = db.Column(db.String(40), nullable=False)  # sent, approved, rejected, commented, auto_approved, edited
+    ip = db.Column(db.String(64), nullable=True)
+    user_agent = db.Column(db.String(240), nullable=True)
+    details = db.Column(db.Text, nullable=True)
+
+class ExtraReportDecision(db.Model):
+    __tablename__ = "extra_report_decisions"
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, db.ForeignKey("extra_report.id"), unique=True, index=True, nullable=False)
+    decided_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    work_date = db.Column("work_date", db.Date, nullable=False, default=date.today)
+    decided_name = db.Column("user_name", db.String(120), nullable=False, default="")
+    decided_note = db.Column(db.Text, nullable=True)
+    minutes = db.Column("minutes", db.Integer, nullable=False, default=0)
+    signature_png = db.Column(db.String(260), nullable=True)  # stored filename under uploads/extra_signatures
 def _auto_accept_if_due(rep: ExtraReport) -> bool:
     # Auto akceptacja po 7 dniach od wysyłki
     if rep.status == "SENT" and rep.sent_at:
         if datetime.utcnow() >= (rep.sent_at + timedelta(days=7)):
             rep.status = "APPROVED_AUTO"
+            try:
+                _extra_audit(rep, "auto_approved", actor_type="system", actor_name=None, details="7 days elapsed")
+            except Exception:
+                pass
             rep.decided_at = datetime.utcnow()
             rep.decided_note = rep.decided_note or "Auto-zaakceptowano po 7 dniach."
             db.session.commit()
@@ -1007,7 +1038,6 @@ document.addEventListener('DOMContentLoaded', function(){
 def plans():
     # Lista planów, z filtrem po projekcie
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
-    users = User.query.order_by(User.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
 
     q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
@@ -1144,7 +1174,6 @@ def admin_plans():
 
 
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
-    users = User.query.order_by(User.name.asc()).all()
 
     selected_pid = request.args.get("project_id", "all")
     q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
@@ -4146,56 +4175,7 @@ def admin_extras():
             flash("Zapisano kontakt do projektu.", "success")
         return redirect(url_for("admin_extras", project_id=pid))
 
-    # Dodanie nowego zgłoszenia dodatków przez admina (w imieniu pracownika)
-    if request.method == "POST" and request.form.get("action") == "add_request":
-        try:
-            pid = int(request.form.get("project_id") or "0")
-        except Exception:
-            pid = 0
-        try:
-            uid = int(request.form.get("user_id") or "0")
-        except Exception:
-            uid = 0
-
-        if not pid or not uid:
-            flash("Wybierz projekt i pracownika.", "danger")
-            return redirect(url_for("admin_extras", project_id=pid or "all"))
-
-        # data
-        try:
-            work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
-        except Exception:
-            work_date = date.today()
-
-        minutes = parse_hhmm((request.form.get("hhmm") or "").strip() or "0:00")
-        desc = (request.form.get("description") or "").strip() or None
-
-        r = ExtraRequest(
-            user_id=uid,
-            project_id=pid,
-            work_date=work_date,
-            minutes=minutes,
-            description=desc,
-            status="NEW",
-            created_at=datetime.utcnow(),
-        )
-        db.session.add(r)
-        db.session.commit()
-
-        # zdjęcia (max 5)
-        try:
-            files = request.files.getlist("images")
-            if files:
-                _save_extra_images(r, files[:5])
-                db.session.commit()
-        except Exception:
-            pass
-
-        flash("Dodano zgłoszenie dodatków.", "success")
-        return redirect(url_for("admin_extras", project_id=pid))
-
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
-    users = User.query.order_by(User.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
 
     q = ExtraRequest.query.join(User).join(Project).filter(ExtraRequest.status != "CANCELED")
@@ -4264,53 +4244,6 @@ def admin_extras():
   </div>
 
   <div class="col-12">
-
-    <div class="card p-3">
-      <h6 class="mb-2">Dodaj zgłoszenie (admin)</h6>
-      <form class="row g-2" method="post" enctype="multipart/form-data">
-        <input type="hidden" name="action" value="add_request">
-        <div class="col-md-3">
-          <label class="form-label">Pracownik</label>
-          <select class="form-select" name="user_id" required>
-            <option value="">Wybierz</option>
-            {% for u in users %}
-              <option value="{{ u.id }}">{{ u.name }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="col-md-3">
-          <label class="form-label">Projekt</label>
-          <select class="form-select" name="project_id" required>
-            {% for p in projects %}
-              <option value="{{ p.id }}" {% if selected_pid != 'all' and selected_pid|int == p.id %}selected{% endif %}>{{ p.name }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="col-md-2">
-          <label class="form-label">Data</label>
-          <input class="form-control" type="date" name="work_date" value="{{ (now().date()).isoformat() }}">
-        </div>
-        <div class="col-md-2">
-          <label class="form-label">Godziny (HH:MM)</label>
-          <input class="form-control" name="hhmm" placeholder="np. 02:30" required>
-        </div>
-        <div class="col-md-12">
-          <label class="form-label">Opis</label>
-          <input class="form-control" name="description" placeholder="Opis dodatków">
-        </div>
-        <div class="col-md-12">
-          <label class="form-label">Zdjęcia (max 5)</label>
-          <input class="form-control" type="file" name="images" accept="image/*" multiple>
-        </div>
-        <div class="col-md-2">
-          <button class="btn btn-outline-success w-100 mt-4">Dodaj</button>
-        </div>
-      </form>
-    </div>
-
-  </div>
-
-  <div class="col-12">
     <div class="card p-3">
       <h6 class="mb-2">Zgłoszenia (zaznacz i utwórz raport)</h6>
       <form method="post" action="{{ url_for('admin_extra_report_create') }}">
@@ -4371,7 +4304,7 @@ def admin_extras():
     </div>
   </div>
 </div>
-""", projects=projects, users=users, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name, now=datetime.utcnow)
+""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name)
 
     return layout("Dodatki (admin)", body)
 
@@ -4583,6 +4516,8 @@ def admin_extra_reports():
 def admin_extra_report_delete(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
     # Zbierz ID zgłoszeń zanim usuniemy raport (i jego items)
     req_ids = []
@@ -4637,6 +4572,8 @@ def admin_extra_report_delete(report_id):
 def admin_extra_report_view(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
     # auto accept jeśli minęło 7 dni
     _auto_accept_if_due(rep)
@@ -4662,9 +4599,12 @@ def admin_extra_report_view(report_id):
         try:
             files = request.files.getlist("attachments")
             if files:
-                _save_extra_report_attachments(rep, files)
-        except Exception:
-            pass
+                saved_cnt = _save_extra_report_attachments(rep, files)
+                if saved_cnt:
+                    flash(f"Dodano załączniki: {saved_cnt} szt.", "success")
+                    return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+        except Exception as e:
+            flash(f"Nie udało się dodać załączników: {e}", "danger")
 
         if action == "send":
             if not rep.recipient_email:
@@ -4704,7 +4644,7 @@ def admin_extra_report_view(report_id):
       <div class="small text-muted mt-2">
         Projekt: <strong>{{ rep.project.name }}</strong><br>
         Status: <strong>{{ rep.status }}</strong>
-      {% if rep.attachments %}<br>Załączniki: {% for a in rep.attachments %}<a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or "plik" }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+      {% if rep.attachments %}<br>Załączniki: {% for a in rep.attachments %}<a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) if rep.token else url_for('admin_extra_report_attachment_download', report_id=rep.id, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or "plik" }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
         {% if rep.sent_at %} | Wysłano: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
         {% if rep.decided_at %} | Decyzja: {{ rep.decided_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
       </div>
@@ -4815,6 +4755,66 @@ def extra_report_public_attachment(token, att_id):
     return send_file(path, as_attachment=True, download_name=(att.original_filename or att.stored_filename))
 
 
+@app.route("/dodatki/r/<token>/img/<int:image_id>")
+def extra_report_public_image(token, image_id):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+    _auto_accept_if_due(rep)
+
+    img = ExtraRequestImage.query.get_or_404(image_id)
+
+    ok = False
+    try:
+        for it in rep.items or []:
+            if it.request_id == img.request_id:
+                ok = True
+                break
+    except Exception:
+        ok = False
+
+    if not ok:
+        abort(404)
+
+    path = extra_image_view_path(img.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path)
+
+
+
+
+@app.route("/dodatki/r/<token>/signature.png")
+def extra_signature_public(token):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
+    if not dec or not dec.signature_png:
+        abort(404)
+    path = os.path.join(EXTRA_SIGNATURE_DIR, dec.signature_png)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path)
+
+
+    img = ExtraRequestImage.query.get_or_404(image_id)
+
+    ok = False
+    try:
+        for it in rep.items or []:
+            if it.request_id == img.request_id:
+                ok = True
+                break
+    except Exception:
+        ok = False
+
+    if not ok:
+        abort(404)
+
+    path = extra_image_view_path(img.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path)
+
+
+
 @app.route("/dodatki/r/<token>", methods=["GET", "POST"])
 def extra_report_public(token):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
@@ -4825,7 +4825,6 @@ def extra_report_public(token):
         lang = "no"
 
     def tr(no_txt, pl_txt=None):
-        # Polish text optional; if not provided, reuse Norwegian
         if lang == "pl":
             return pl_txt if pl_txt is not None else no_txt
         return no_txt
@@ -4841,6 +4840,9 @@ def extra_report_public(token):
 
         action = request.form.get("action")
         note = (request.form.get("note") or "").strip() or None
+        sign_name = (request.form.get("sign_name") or "").strip() or None
+        signature_data = (request.form.get("signature_data") or "").strip() or None
+
         rep.decided_at = datetime.utcnow()
         rep.decided_note = note
 
@@ -4857,11 +4859,35 @@ def extra_report_public(token):
             if not rep.decided_note:
                 rep.decided_note = tr("Kommentarer lagt til.", "Dodano uwagi.")
 
-        db.session.commit()
+        # zapisz decyzję + podpis do osobnej tabeli (bez ryzykownych migracji)
         try:
-            _notify_extra_report_status(rep, "decyzja odbiorcy")
+            dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
+            if not dec:
+                dec = ExtraReportDecision(report_id=rep.id)
+                db.session.add(dec)
+            dec.decided_at = rep.decided_at
+            dec.decided_note = rep.decided_note
+            dec.decided_name = sign_name or ""
+            dec.work_date = date.today()
+            dec.minutes = 0
+            fn = _save_signature_png(signature_data) if signature_data else None
+            if fn:
+                dec.signature_png = fn
         except Exception:
             pass
+
+        db.session.commit()
+
+        try:
+            _extra_audit(rep, rep.status.lower(), actor_type="public", actor_name=sign_name, details=rep.decided_note)
+        except Exception:
+            pass
+
+        try:
+            _notify_extra_report_status(rep, "status change")
+        except Exception:
+            pass
+
         flash(tr("Takk. Beslutningen er lagret.", "Dziękujemy. Zapisano decyzję."), "success")
         return redirect(url_for("extra_report_public", token=token, lang=lang))
 
@@ -4869,9 +4895,11 @@ def extra_report_public(token):
     if rep.sent_at:
         auto_date = (rep.sent_at + timedelta(days=7)).date()
 
-    # language toggle links
     base_no = url_for("extra_report_public", token=rep.token, lang="no")
     base_pl = url_for("extra_report_public", token=rep.token, lang="pl")
+
+    # fetch decision for display (name/signature)
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
     body = render_template_string(r"""
 <div class="container-narrow">
@@ -4882,12 +4910,6 @@ def extra_report_public(token):
         <div class="small text-muted">
           {{ tr("Prosjekt", "Projekt") }}: <strong>{{ rep.project.name }}</strong><br>
           {{ tr("Status", "Status") }}: <strong>{{ rep.status }}</strong>
-          {% if rep.attachments %}
-            <br>{{ tr("Vedlegg", "Załączniki") }}:
-            {% for a in rep.attachments %}
-              <a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or tr("fil", "plik") }}</a>{% if not loop.last %}, {% endif %}
-            {% endfor %}
-          {% endif %}
           {% if rep.sent_at %}<br>{{ tr("Sendt", "Wysłano") }}: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
           {% if auto_date %}<br><strong>{{ tr("Merk", "Uwaga") }}:</strong> {{ tr("rapporten blir automatisk godkjent 7 dager etter sending", "raport zostanie automatycznie zatwierdzony po 7 dniach od wysłania") }} ({{ auto_date.isoformat() }}).{% endif %}
         </div>
@@ -4927,7 +4949,7 @@ def extra_report_public(token):
               <td>
                 {% if it.request and it.request.images %}
                   {% for img in it.request.images %}
-                    <a href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                    <a href="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
                   {% endfor %}
                 {% else %}-{% endif %}
               </td>
@@ -4937,30 +4959,116 @@ def extra_report_public(token):
       </table>
     </div>
 
-    <div class="mt-2 fw-bold">{{ tr("Sum", "Suma") }}: {{ fmt(total(rep)) }}</div>
+    {% if rep.attachments %}
+      <hr class="my-3">
+      <h6 class="mb-2">{{ tr("Vedlegg til rapporten", "Załączniki do raportu") }}</h6>
+      <div class="list-group">
+        {% for a in rep.attachments %}
+          <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center"
+             href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) if rep.token else url_for('admin_extra_report_attachment_download', report_id=rep.id, att_id=a.id) }}" target="_blank" rel="noopener">
+            <span>{{ a.original_filename or tr("fil", "plik") }}</span>
+            <span class="badge bg-light text-dark border">{{ tr("Last ned", "Pobierz") }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <div class="mt-3 fw-bold">{{ tr("Sum", "Suma") }}: {{ fmt(total_minutes(rep)) }}</div>
 
     {% if rep.status == 'SENT' %}
       <hr class="my-3">
-      <form method="post" class="row g-2">
+      <form method="post" class="row g-2" onsubmit="storeSig()">
         <div class="col-12">
           <label class="form-label">{{ tr("Kommentar (valgfritt)", "Uwagi (opcjonalnie)") }}</label>
           <textarea class="form-control" name="note" rows="3" placeholder="{{ tr('Hvis du vil legge til noe...', 'Jeśli chcesz coś dopisać...') }}"></textarea>
         </div>
+        <div class="col-12">
+          <label class="form-label">{{ tr("Navn (signatur)", "Imię i nazwisko (podpis)") }}</label>
+          <input class="form-control" name="sign_name" placeholder="{{ tr('Skriv ditt navn', 'Wpisz swoje imię i nazwisko') }}">
+        </div>
+        <div class="col-12">
+          <label class="form-label">{{ tr("Håndskrevet signatur (valgfritt)", "Podpis odręczny (opcjonalnie)") }}</label>
+          <div class="border rounded p-2" style="background:#fff;">
+            <canvas id="sigpad" width="520" height="140" style="width:100%;max-width:520px;touch-action:none;"></canvas>
+          </div>
+          <div class="mt-2 d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="sigClear()">{{ tr("Tøm", "Wyczyść") }}</button>
+          </div>
+          <input type="hidden" name="signature_data" id="signature_data">
+          <div class="small text-muted mt-1">{{ tr("Hvis du ikke signerer her, kan du bare skrive navnet ditt.", "Jeśli nie podpiszesz się tutaj, wystarczy wpisać imię i nazwisko.") }}</div>
+        </div>
+
         <div class="col-12 d-flex gap-2">
           <button class="btn btn-success" name="action" value="approve">{{ tr("Godkjenn", "Zatwierdź") }}</button>
           <button class="btn btn-danger" name="action" value="reject">{{ tr("Avvis", "Odrzuć") }}</button>
           <button class="btn btn-outline-primary" name="action" value="comment">{{ tr("Legg til kommentar", "Dodaj uwagi") }}</button>
         </div>
       </form>
+
+      <script>
+        (function(){
+          const c = document.getElementById('sigpad');
+          if(!c) return;
+          const ctx = c.getContext('2d');
+          ctx.lineWidth = 2;
+          let drawing = false;
+          let last = null;
+
+          function pos(evt){
+            const r = c.getBoundingClientRect();
+            const p = (evt.touches && evt.touches[0]) ? evt.touches[0] : evt;
+            return {x: (p.clientX - r.left) * (c.width / r.width), y: (p.clientY - r.top) * (c.height / r.height)};
+          }
+
+          function start(evt){ drawing = true; last = pos(evt); evt.preventDefault(); }
+          function move(evt){
+            if(!drawing) return;
+            const p = pos(evt);
+            ctx.beginPath();
+            ctx.moveTo(last.x, last.y);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            last = p;
+            evt.preventDefault();
+          }
+          function end(evt){ drawing = false; last = null; evt.preventDefault(); }
+
+          c.addEventListener('mousedown', start);
+          c.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', end);
+
+          c.addEventListener('touchstart', start, {passive:false});
+          c.addEventListener('touchmove', move, {passive:false});
+          window.addEventListener('touchend', end, {passive:false});
+
+          window.sigClear = function(){ ctx.clearRect(0,0,c.width,c.height); };
+
+          window.storeSig = function(){
+            try{
+              document.getElementById('signature_data').value = c.toDataURL('image/png');
+            }catch(e){}
+            return true;
+          }
+        })();
+      </script>
     {% else %}
       {% if rep.decided_note %}
         <hr class="my-3">
-        <div class="alert alert-info mb-0" style="white-space:pre-wrap">{{ rep.decided_note }}</div>
+        <div class="alert alert-info mb-2" style="white-space:pre-wrap">{{ rep.decided_note }}</div>
+      {% endif %}
+
+      {% if dec and (dec.decided_name or dec.signature_png) %}
+        <div class="small text-muted">{{ tr("Signert av", "Podpis") }}: <strong>{{ dec.decided_name or "-" }}</strong> {% if dec.decided_at %}({{ dec.decided_at.strftime("%Y-%m-%d %H:%M") }}){% endif %}</div>
+        {% if dec.signature_png %}
+          <div class="mt-2">
+            <img alt="signature" src="{{ url_for('extra_signature_public', token=rep.token) }}" style="max-width:520px;width:100%;border:1px solid #ddd;border-radius:8px;background:#fff;">
+          </div>
+        {% endif %}
       {% endif %}
     {% endif %}
   </div>
 </div>
-""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, auto_date=auto_date,
+""", rep=rep, fmt=fmt_hhmm, total_minutes=_extra_report_total_minutes, auto_date=auto_date,
        lang=lang, tr=tr, base_no=base_no, base_pl=base_pl)
 
     return layout(tr("Tilleggsrapport", "Raport dodatków"), body)
@@ -4971,6 +5079,8 @@ def extra_report_public(token):
 def admin_extra_report_attachment_download(report_id, att_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
     att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
     path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
     return send_file(path, as_attachment=True, download_name=(att.original_filename or att.stored_filename))
@@ -4981,6 +5091,8 @@ def admin_extra_report_attachment_download(report_id, att_id):
 def admin_extra_report_attachment_delete(report_id, att_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
     att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
     try:
         path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
@@ -4999,6 +5111,8 @@ def admin_extra_report_attachment_delete(report_id, att_id):
 def admin_extra_report_pdf(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
     if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
         flash("PDF jest dostępny po decyzji (zatwierdzenie/odrzucenie/uwagi).", "warning")
@@ -5016,18 +5130,18 @@ def admin_extra_report_pdf(report_id):
 
     y = h - 60
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(50, y, f"Tilleggsrapport #{rep.id}")
+    c.drawString(50, y, f"Raport dodatków #{rep.id}")
     y -= 22
     c.setFont("Helvetica", 10)
-    c.drawString(50, y, f"Prosjekt: {rep.project.name}")
+    c.drawString(50, y, f"Projekt: {rep.project.name}")
     y -= 14
     c.drawString(50, y, f"Status: {rep.status}")
     y -= 14
     if rep.sent_at:
-        c.drawString(50, y, f"Sendt: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
+        c.drawString(50, y, f"Wysłano: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
         y -= 14
         auto_d = (rep.sent_at + timedelta(days=7)).date().isoformat()
-        c.drawString(50, y, f"Auto-godkjenning etter 7 dager: {auto_d}")
+        c.drawString(50, y, f"Auto-akceptacja po 7 dniach: {auto_d}")
         y -= 14
     if rep.decided_at:
         c.drawString(50, y, f"Decyzja: {rep.decided_at.strftime('%Y-%m-%d %H:%M')}")
@@ -5145,6 +5259,58 @@ def _notify_extra_report_status(rep: ExtraReport, reason: str) -> None:
     notify_to = (os.getenv("REPORT_STATUS_NOTIFY_TO") or "").strip() or None
     fallback = (os.getenv("SMTP_USER") or "").strip() or None
 
+
+EXTRA_SIGNATURE_DIR = os.path.join(UPLOAD_DIR, "extra_signatures")
+os.makedirs(EXTRA_SIGNATURE_DIR, exist_ok=True)
+
+def _extra_audit(rep, action, actor_type="system", actor_name=None, details=None):
+    try:
+        a = ExtraReportAudit(
+            report_id=rep.id,
+            actor_type=actor_type,
+            actor_name=actor_name,
+            action=action,
+            ip=request.remote_addr if request else None,
+            user_agent=(request.headers.get("User-Agent") if request else None),
+            details=details,
+        )
+        db.session.add(a)
+        db.session.commit()
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+def _save_signature_png(data_url):
+    """
+    Accepts a data URL like 'data:image/png;base64,...' and stores it to EXTRA_SIGNATURE_DIR.
+    Returns stored filename or None.
+    """
+    if not data_url or "," not in data_url:
+        return None
+    try:
+        header, b64 = data_url.split(",", 1)
+        if "image/png" not in header:
+            return None
+        import base64, uuid
+        raw = base64.b64decode(b64.encode("utf-8"))
+        name = f"sig_{uuid.uuid4().hex}.png"
+        path = os.path.join(EXTRA_SIGNATURE_DIR, name)
+        with open(path, "wb") as f:
+            f.write(raw)
+        # naive "blank signature" filter: very small png likely means empty
+        if os.path.getsize(path) < 1200:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return None
+        return name
+    except Exception:
+        return None
+
+
     recipients = []
     for r in (notify_to, fallback):
         if r and r not in recipients:
@@ -5184,6 +5350,10 @@ def _notify_extra_report_status(rep: ExtraReport, reason: str) -> None:
         except Exception:
             pass
 
+
+
+# --- Init DB after all models/routes are defined ---
+init_db()
 
 if __name__ == "__main__":
     ensure_db_file()
