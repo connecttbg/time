@@ -44,6 +44,14 @@ DB_FILE = os.path.join(DATA_DIR, "app.db")
 # Zdjęcia do wpisów (trzymamy obok bazy, nie w static)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 
+# Załączniki do raportów "Dodatki" (admin dodaje pliki/zdjęcia do wysyłki)
+EXTRA_REPORT_ATTACH_DIR = os.path.join(UPLOAD_DIR, "extra_report_attachments")
+MAX_ATTACH_MB = int(os.getenv("MAX_ATTACH_MB", "25"))
+MAX_ATTACH_BYTES = MAX_ATTACH_MB * 1024 * 1024
+MAX_ATTACH_COUNT = int(os.getenv("MAX_ATTACH_COUNT", "10"))
+ALLOWED_ATTACH_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".doc", ".docx", ".xls", ".xlsx", ".txt"}
+
+
 
 # Plany (PDF) przypięte do projektów
 PLANS_DIR = os.path.join(DATA_DIR, "plans")
@@ -165,6 +173,93 @@ class LeaveRequest(db.Model):
     decided_by_user = db.relationship("User", foreign_keys=[decided_by])
 
 
+# --- Dodatki (extra godziny z akceptacją raportu) ---
+
+class ProjectContact(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+    email = db.Column(db.String(200), nullable=False)
+    name = db.Column(db.String(200), nullable=True)
+    is_default = db.Column(db.Boolean, default=True)
+
+    project = db.relationship("Project", backref="contacts")
+
+
+class ExtraRequest(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+
+    work_date = db.Column(db.Date, nullable=False)
+    minutes = db.Column(db.Integer, nullable=False, default=0)
+    description = db.Column(db.Text, nullable=True)
+
+    status = db.Column(db.String(30), default="NEW")  # NEW / INCLUDED / CANCELED
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="extra_requests")
+    project = db.relationship("Project", backref="extra_requests")
+
+    images = db.relationship(
+        "ExtraRequestImage",
+        backref="request",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class ExtraRequestImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.Integer, db.ForeignKey("extra_request.id"), nullable=False, index=True)
+    stored_filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class ExtraReport(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+    created_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
+    # dane wysyłki
+    recipient_email = db.Column(db.String(200), nullable=True)
+    token = db.Column(db.String(64), unique=True, index=True, nullable=True)
+
+    status = db.Column(db.String(30), default="DRAFT")  # DRAFT / SENT / APPROVED / REJECTED / COMMENTED / APPROVED_AUTO
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    sent_at = db.Column(db.DateTime, nullable=True)
+    decided_at = db.Column(db.DateTime, nullable=True)
+    decided_note = db.Column(db.Text, nullable=True)
+
+    report_text = db.Column(db.Text, nullable=True)
+    total_minutes_override = db.Column(db.Integer, nullable=True)  # jeśli admin chce ręcznie zmienić sumę
+
+    project = db.relationship("Project", backref="extra_reports")
+    created_by_user = db.relationship("User", foreign_keys=[created_by])
+
+    items = db.relationship(
+        "ExtraReportItem",
+        backref="report",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class ExtraReportItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, db.ForeignKey("extra_report.id"), nullable=False, index=True)
+    request_id = db.Column(db.Integer, db.ForeignKey("extra_request.id"), nullable=False, index=True)
+
+    # snapshot, żeby można było edytować bez ruszania pierwotnego zgłoszenia
+    user_name = db.Column(db.String(120), nullable=False)
+    work_date = db.Column(db.Date, nullable=False)
+    minutes = db.Column(db.Integer, nullable=False, default=0)
+    description = db.Column(db.Text, nullable=True)
+
+    request = db.relationship("ExtraRequest")
+
+
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -219,6 +314,7 @@ def require_admin():
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(EXTRA_REPORT_ATTACH_DIR, exist_ok=True)
     os.makedirs(PLANS_DIR, exist_ok=True)
     with app.app_context():
         db.create_all()
@@ -428,6 +524,7 @@ BASE = """
                         <li class="nav-item"><a class="nav-link" href="{{ url_for(\'admin_plans\') }}">Plany (PDF)</a></li>
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
@@ -435,6 +532,7 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
           {% else %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_costs') }}">Koszty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
@@ -462,6 +560,17 @@ BASE = """
 
 <div class="text-center mt-4 text-muted" style="font-size:12px;">aplikacja utworzona przez dataconnect.no</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+function limitFiles(input, max){
+  if (!input || !input.files) return;
+  if (input.files.length > max) {
+    alert('Możesz dodać maksymalnie ' + max + ' plików.');
+    input.value = '';
+  }
+}
+</script>
+
 </body>
 </html>
 """
@@ -477,6 +586,121 @@ def layout(title, body):
 def logout():
     logout_user()
     return redirect(url_for("login"))
+
+
+# --- Dodatki: pomocnicze ---
+def _default_project_contact_email(project_id: int) -> Optional[str]:
+    c = ProjectContact.query.filter_by(project_id=project_id).order_by(ProjectContact.is_default.desc(), ProjectContact.id.asc()).first()
+    return c.email if c else None
+
+def _upsert_project_contact(project_id: int, email: str, name: Optional[str] = None):
+    email = (email or "").strip()
+    if not email:
+        return
+    c = ProjectContact.query.filter_by(project_id=project_id).order_by(ProjectContact.id.asc()).first()
+    if not c:
+        c = ProjectContact(project_id=project_id, email=email, name=name or None, is_default=True)
+        db.session.add(c)
+    else:
+        c.email = email
+        c.name = name or c.name
+        c.is_default = True
+
+def _send_smtp_email(to_email: str, subject: str, body: str):
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    smtp_from = os.environ.get("SMTP_FROM") or smtp_user
+
+    if not (smtp_host and smtp_port and smtp_user and smtp_password and to_email):
+        raise RuntimeError("Brak konfiguracji SMTP (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD) lub adresu docelowego.")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp_from
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+
+def _gen_token() -> str:
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+def _extra_report_total_minutes(rep: ExtraReport) -> int:
+    if rep.total_minutes_override is not None:
+        return rep.total_minutes_override
+    try:
+        return sum(it.minutes for it in rep.items)
+    except Exception:
+        return 0
+
+
+class ExtraReportAttachment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, db.ForeignKey("extra_report.id"), nullable=False, index=True)
+    stored_filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    report = db.relationship("ExtraReport", backref=db.backref("attachments", cascade="all, delete-orphan", lazy="select"))
+
+def _auto_accept_if_due(rep: ExtraReport) -> bool:
+    # Auto akceptacja po 7 dniach od wysyłki
+    if rep.status == "SENT" and rep.sent_at:
+        if datetime.utcnow() >= (rep.sent_at + timedelta(days=7)):
+            rep.status = "APPROVED_AUTO"
+            rep.decided_at = datetime.utcnow()
+            rep.decided_note = rep.decided_note or "Auto-zaakceptowano po 7 dniach."
+            db.session.commit()
+            try:
+                _notify_extra_report_status(rep, "auto-zaakcept (7 dni)")
+            except Exception:
+                pass
+            return True
+    return False
+
+def _save_extra_images(req_obj: ExtraRequest, files):
+    if not files:
+        return
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # max 5
+    safe_files = [f for f in files if f and getattr(f, "filename", "")]
+    safe_files = safe_files[:5]
+    for f in safe_files:
+        name = secure_filename(f.filename)
+        _, ext = os.path.splitext(name)
+        ext = (ext or "").lower()
+
+        # HEIC/HEIF bez pillow-heif nie otworzymy
+        if ext in {".heic", ".heif"} and not HEIF_SUPPORTED:
+            flash("Ten telefon wysłał zdjęcie HEIC/HEIF. Zmień w iPhonie: Ustawienia > Aparat > Formaty > Najbardziej zgodne (JPG).")
+            continue
+
+        size = _file_size_bytes(f)
+        if size is not None and size > MAX_IMAGE_BYTES:
+            flash(f"Zdjęcie jest za duże ({MAX_IMAGE_MB} MB max). Zmniejsz je lub wyślij mniejsze.")
+            continue
+
+        stored = _safe_image_filename(name, req_obj.id)
+        path = os.path.join(UPLOAD_DIR, stored)
+        try:
+            try:
+                f.stream.seek(0)
+            except Exception:
+                pass
+            _save_compressed_image(f, path)
+            db.session.add(ExtraRequestImage(request_id=req_obj.id, stored_filename=stored, original_filename=name))
+        except Exception:
+            flash("Nie udało się zapisać jednego ze zdjęć. Spróbuj ponownie lub wyślij inne zdjęcie.")
+
+def extra_image_view_path(stored_filename: str) -> str:
+    return os.path.join(UPLOAD_DIR, stored_filename)
+
+
 # --- Auth ---
 @app.route("/", methods=["GET", "POST"])
 def login():
@@ -502,7 +726,7 @@ def login():
       <div class="text-muted">Rejestrator czasu pracy</div>
     </div>
     <div class="card p-3">
-      <form method="post">
+      <form method="post" enctype="multipart/form-data">
         <div class="mb-3">
           <label class="form-label">E-mail</label>
           <input class="form-control" type="email" name="email" placeholder="np. imie@firma.no" required>
@@ -2137,6 +2361,20 @@ def admin_reports():
     d_to = request.args.get("to")
     user_id = request.args.get("user_id")
     project_id = request.args.get("project_id")
+    # Domyślnie pokazuj bieżący miesiąc (jeśli nie podano zakresu dat)
+    if not d_from and not d_to:
+        from datetime import date, timedelta
+        today = date.today()
+        first_day = today.replace(day=1)
+        # pierwszy dzień następnego miesiąca
+        if first_day.month == 12:
+            next_month = first_day.replace(year=first_day.year + 1, month=1)
+        else:
+            next_month = first_day.replace(month=first_day.month + 1)
+        last_day = next_month - timedelta(days=1)
+        d_from = first_day.isoformat()
+        d_to = last_day.isoformat()
+
 
     q = Entry.query.join(User).join(Project)
     if d_from:
@@ -2160,11 +2398,11 @@ def admin_reports():
   <form class="row g-2 mb-3" method="get">
     <div class="col-md-3">
       <label class="form-label">Od</label>
-      <input class="form-control" type="date" name="from" value="{{ request.args.get('from','') }}">
+      <input class="form-control" type="date" name="from" value="{{ d_from or '' }}">
     </div>
     <div class="col-md-3">
       <label class="form-label">Do</label>
-      <input class="form-control" type="date" name="to" value="{{ request.args.get('to','') }}">
+      <input class="form-control" type="date" name="to" value="{{ d_to or '' }}">
     </div>
     <div class="col-md-3">
       <label class="form-label">Pracownik</label>
@@ -2194,11 +2432,11 @@ def admin_reports():
   {% if rows %}
     <div class="mb-2 d-flex gap-2">
       <a class="btn btn-outline-success btn-sm"
-         href="{{ url_for('admin_reports_export') }}?from={{ request.args.get('from','') }}&to={{ request.args.get('to','') }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
+         href="{{ url_for('admin_reports_export') }}?from={{ d_from or '' }}&to={{ d_to or '' }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
         Eksport prosty (Excel)
       </a>
       <a class="btn btn-outline-primary btn-sm"
-         href="{{ url_for('admin_reports_payroll') }}?from={{ request.args.get('from','') }}&to={{ request.args.get('to','') }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
+         href="{{ url_for('admin_reports_payroll') }}?from={{ d_from or '' }}&to={{ d_to or '' }}&user_id={{ request.args.get('user_id','all') }}&project_id={{ request.args.get('project_id','all') }}">
         Lista płac (Excel)
       </a>
     </div>
@@ -2237,7 +2475,7 @@ def admin_reports():
     <div class="text-muted">Brak wpisów.</div>
   {% endif %}
 </div>
-    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm, total_minutes=total_minutes)
+    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm, total_minutes=total_minutes, d_from=d_from, d_to=d_to)
     return layout("Raport", body)
 
 @app.route("/admin/reports/export", methods=["GET"])
@@ -2453,7 +2691,7 @@ def user_summary():
                 <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
               </tr>
               {% else %}
-              <tr><td colspan="6" class="text-muted">Brak wpisów w tym miesiącu.</td></tr>
+              <tr><td colspan="7" class="text-muted">Brak wpisów w tym miesiącu.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -2483,7 +2721,7 @@ def user_summary():
                 <td>{% if e.is_overtime %}✔{% else %}-{% endif %}</td>
               </tr>
               {% else %}
-              <tr><td colspan="6" class="text-muted">Brak wpisów w poprzednim miesiącu.</td></tr>
+              <tr><td colspan="7" class="text-muted">Brak wpisów w poprzednim miesiącu.</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -3240,7 +3478,7 @@ def leaves():
           </td>
         </tr>
         {% else %}
-          <tr><td colspan="6" class="text-muted">Brak próśb o urlop.</td></tr>
+          <tr><td colspan="7" class="text-muted">Brak próśb o urlop.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -3437,7 +3675,7 @@ def admin_leaves_print():
       </tr>
       {% endfor %}
       {% if not rows %}
-      <tr><td colspan="6" class="small">Brak danych.</td></tr>
+      <tr><td colspan="7" class="small">Brak danych.</td></tr>
       {% endif %}
     </tbody>
   </table>
@@ -3585,6 +3823,1229 @@ def leave_approve(leave_id):
     return redirect(url_for("leaves"))
 
 
+
+
+# --- Dodatki (extra godziny) ---
+
+@app.route("/dodatki", methods=["GET", "POST"])
+@login_required
+def extras():
+    if request.method == "POST":
+        work_date_s = request.form.get("work_date") or date.today().isoformat()
+        project_id = int(request.form.get("project_id") or "0")
+        hhmm = request.form.get("hhmm") or "0:00"
+        desc = request.form.get("description") or ""
+        minutes = parse_hhmm(hhmm)
+
+        try:
+            d = datetime.strptime(work_date_s, "%Y-%m-%d").date()
+        except Exception:
+            d = date.today()
+
+        if project_id <= 0:
+            flash("Wybierz projekt.", "danger")
+            return redirect(url_for("extras"))
+
+        req_obj = ExtraRequest(
+            user_id=current_user.id,
+            project_id=project_id,
+            work_date=d,
+            minutes=minutes,
+            description=desc.strip() or None,
+            status="NEW",
+        )
+        db.session.add(req_obj)
+        db.session.commit()
+
+        images_files = request.files.getlist("images")
+        try:
+            _save_extra_images(req_obj, images_files)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+        flash("Dodano zgłoszenie dodatków.", "success")
+        return redirect(url_for("extras"))
+
+    projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
+    my = ExtraRequest.query.filter_by(user_id=current_user.id).order_by(ExtraRequest.created_at.desc(), ExtraRequest.id.desc()).limit(50).all()
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-3">Dodatki – zgłoś extra godziny</h5>
+      <form id="extrasForm" class="row g-2" method="post" enctype="multipart/form-data">
+        <div class="col-md-3">
+          <label class="form-label">Data</label>
+          <input class="form-control" type="date" name="work_date" value="{{ date.today().isoformat() }}" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id" required>
+            {% for p in projects %}
+              <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Czas (HH:MM)</label>
+          <input class="form-control" type="text" name="hhmm" value="1:00" required>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Opis</label>
+          <input class="form-control" type="text" name="description" placeholder="Co było extra? (opcjonalnie)">
+        </div>
+        <div class="col-12">
+          <label class="form-label">Zdjęcia</label>
+          <input class="form-control" type="file" name="images" accept="image/*" multiple onchange="limitFiles(this,5)">
+          <div class="form-text">Maks 5 zdjęć na zgłoszenie.</div>
+        </div>
+        <div class="col-12">
+          <button class="btn btn-primary">Dodaj zgłoszenie</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-0">Moje zgłoszenia (ostatnie 50)</h5>
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>Data</th><th>Projekt</th><th>Opis</th><th>Zdjęcia</th><th>Godziny</th><th>Status</th><th class="text-end">Akcje</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in my %}
+              <tr>
+                <td>{{ r.work_date.isoformat() }}</td>
+                <td>{{ r.project.name }}</td>
+                <td>{{ r.description or '' }}</td>
+                <td>
+                  {% if r.images %}
+                    {% for img in r.images %}
+                      <a href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                    {% endfor %}
+                  {% else %}-{% endif %}
+                </td>
+                <td>{{ fmt(r.minutes) }}</td>
+                <td><span class="badge bg-light text-dark border">{{ r.status }}</span></td>
+              
+                <td class="text-end text-nowrap">
+                  {% if r.status == 'NEW' %}
+                    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('user_extra_request_edit', req_id=r.id) }}">Edytuj</a>
+                    <form method="post" action="/dodatki/request/{{ r.id }}/delete" style="display:inline;" onsubmit="return confirm('Usunąć zgłoszenie?');">
+                      <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                    </form>
+                  {% else %}
+                    <span class="text-muted">-</span>
+                  {% endif %}
+                </td>
+              </tr>
+
+            {% else %}
+              <tr><td colspan="7" class="text-muted">Brak zgłoszeń.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+""", projects=projects, my=my, fmt=fmt_hhmm, date=date)
+
+    return layout("Dodatki", body)
+
+
+
+@app.route("/dodatki/request/<int:req_id>/edit", methods=["GET", "POST"])
+@login_required
+def user_extra_request_edit(req_id):
+    r = ExtraRequest.query.get_or_404(req_id)
+    if r.user_id != current_user.id:
+        abort(403)
+    if r.status != "NEW":
+        flash("Nie można edytować zgłoszenia, które zostało już wysłane do raportu.", "warning")
+        return redirect(url_for("extras"))
+
+    projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
+
+    if request.method == "POST":
+        try:
+            r.work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+        try:
+            pid = int(request.form.get("project_id") or r.project_id)
+            if pid > 0:
+                r.project_id = pid
+        except Exception:
+            pass
+
+        r.minutes = parse_hhmm(request.form.get("hhmm") or fmt_hhmm(r.minutes or 0))
+        r.description = (request.form.get("description") or "").strip() or None
+
+        # dodaj nowe zdjęcia (max 5 łącznie)
+        files = request.files.getlist("images")
+        if files:
+            try:
+                existing = len(r.images or [])
+                if existing >= 5:
+                    flash("Masz już 5 zdjęć w tym zgłoszeniu. Usuń jakieś zdjęcie, aby dodać nowe.", "warning")
+                else:
+                    _save_extra_images(r, files[: max(0, 5 - existing)])
+            except Exception:
+                pass
+
+        db.session.commit()
+        flash("Zapisano zmiany.", "success")
+        return redirect(url_for("extras"))
+
+    body = render_template_string(r"""
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center">
+    <h5 class="mb-0">Edytuj zgłoszenie dodatków</h5>
+    <a class="btn btn-outline-secondary" href="{{ url_for('extras') }}">Wróć</a>
+  </div>
+
+  <form class="row g-2 mt-3" method="post" enctype="multipart/form-data">
+    <div class="col-md-3">
+      <label class="form-label">Data</label>
+      <input class="form-control" type="date" name="work_date" value="{{ r.work_date.isoformat() }}" required>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Projekt</label>
+      <select class="form-select" name="project_id" required>
+        {% for p in projects %}
+          <option value="{{ p.id }}" {% if p.id == r.project_id %}selected{% endif %}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Godziny (HH:MM)</label>
+      <input class="form-control" name="hhmm" value="{{ fmt(r.minutes) }}" placeholder="np. 02:30" required>
+    </div>
+    <div class="col-md-12">
+      <label class="form-label">Opis</label>
+      <textarea class="form-control" name="description" rows="3">{{ r.description or '' }}</textarea>
+    </div>
+
+    <div class="col-md-12">
+      <label class="form-label">Zdjęcia (max 5 łącznie)</label>
+      <input class="form-control" type="file" name="images" accept="image/*" multiple>
+      <div class="small text-muted mt-1">Dodane zdjęcia:</div>
+      <div class="mt-1">
+        {% if r.images %}
+          {% for img in r.images %}
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">Podgląd</a>
+            <form method="post" action="{{ url_for('user_extra_image_delete', image_id=img.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć to zdjęcie?');">
+              <button class="btn btn-sm btn-outline-danger">Usuń zdjęcie</button>
+            </form>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted">brak</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="col-md-12 mt-2">
+      <button class="btn btn-primary">Zapisz</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('extras') }}">Anuluj</a>
+    </div>
+  </form>
+</div>
+""", r=r, projects=projects, fmt=fmt_hhmm)
+
+    return layout("Edytuj dodatki", body)
+
+
+@app.route("/dodatki/image/<int:image_id>/delete", methods=["POST"])
+@login_required
+def user_extra_image_delete(image_id):
+    img = ExtraRequestImage.query.get_or_404(image_id)
+    req_obj = ExtraRequest.query.get(img.request_id)
+    if not req_obj or req_obj.user_id != current_user.id:
+        abort(403)
+    if req_obj.status != "NEW":
+        flash("Nie można usuwać zdjęć ze zgłoszenia, które zostało już wysłane do raportu.", "warning")
+        return redirect(url_for("extras"))
+
+    try:
+        path = extra_image_view_path(img.stored_filename)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+    db.session.delete(img)
+    db.session.commit()
+    flash("Usunięto zdjęcie.", "success")
+    return redirect(url_for("user_extra_request_edit", req_id=req_obj.id))
+
+
+
+
+
+@app.route("/dodatki/request/<int:req_id>/delete", methods=["POST"])
+@login_required
+def user_extra_request_delete(req_id):
+    r = ExtraRequest.query.get_or_404(req_id)
+    if r.user_id != current_user.id:
+        abort(403)
+    if r.status != "NEW":
+        flash("Nie można usunąć zgłoszenia, które zostało już wysłane do raportu.", "warning")
+        return redirect(url_for("extras"))
+
+    # usuń zdjęcia
+    try:
+        for img in list(r.images or []):
+            try:
+                path = extra_image_view_path(img.stored_filename)
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    db.session.delete(r)
+    db.session.commit()
+    flash("Zgłoszenie zostało usunięte.", "success")
+    return redirect(url_for("extras"))
+
+
+@app.route("/dodatki/image/<int:image_id>", methods=["GET"])
+@login_required
+def extra_image_view(image_id):
+    img = ExtraRequestImage.query.get_or_404(image_id)
+    path = extra_image_view_path(img.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path, mimetype="image/jpeg")
+
+
+@app.route("/admin/dodatki", methods=["GET", "POST"])
+@login_required
+def admin_extras():
+    require_admin()
+
+    # Ustawienie maila kontaktowego per projekt (opcjonalnie)
+    if request.method == "POST" and request.form.get("action") == "save_contact":
+        pid = int(request.form.get("project_id") or "0")
+        email = (request.form.get("contact_email") or "").strip()
+        name = (request.form.get("contact_name") or "").strip()
+        if pid and email:
+            _upsert_project_contact(pid, email, name or None)
+            db.session.commit()
+            flash("Zapisano kontakt do projektu.", "success")
+        return redirect(url_for("admin_extras", project_id=pid))
+
+    projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+    selected_pid = request.args.get("project_id", "all")
+
+    q = ExtraRequest.query.join(User).join(Project).filter(ExtraRequest.status != "CANCELED")
+    if selected_pid != "all":
+        try:
+            q = q.filter(ExtraRequest.project_id == int(selected_pid))
+        except Exception:
+            selected_pid = "all"
+
+    rows = q.order_by(ExtraRequest.created_at.desc(), ExtraRequest.id.desc()).limit(300).all()
+
+    # kontakty
+    contact_email = None
+    contact_name = None
+    if selected_pid != "all":
+        try:
+            c = ProjectContact.query.filter_by(project_id=int(selected_pid)).order_by(ProjectContact.is_default.desc(), ProjectContact.id.asc()).first()
+            if c:
+                contact_email = c.email
+                contact_name = c.name
+        except Exception:
+            pass
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <h5 class="mb-2">Dodatki (admin)</h5>
+      <form class="row g-2 align-items-end" method="get">
+        <div class="col-md-5">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id">
+            <option value="all" {% if selected_pid == 'all' %}selected{% endif %}>Wszystkie</option>
+            {% for p in projects %}
+              <option value="{{ p.id }}" {% if selected_pid|int == p.id %}selected{% endif %}>{{ p.name }}{% if not p.is_active %} (nieaktywny){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-outline-primary w-100">Filtruj</button>
+        </div>
+        <div class="col-md-5 text-end">
+          <a class="btn btn-outline-secondary" href="{{ url_for('admin_extra_reports') }}">Lista raportów</a>
+        </div>
+      </form>
+
+      {% if selected_pid != 'all' %}
+      <hr class="my-3">
+      <form class="row g-2" method="post">
+        <input type="hidden" name="action" value="save_contact">
+        <div class="col-md-4">
+          <label class="form-label">E-mail odpowiedzialnej osoby (domyślny)</label>
+          <input class="form-control" name="contact_email" value="{{ contact_email or '' }}" placeholder="np. pm@firma.no">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Imię/Nazwa (opcjonalnie)</label>
+          <input class="form-control" name="contact_name" value="{{ contact_name or '' }}" placeholder="np. Jan Kowalski">
+        </div>
+        <div class="col-md-2">
+          <input type="hidden" name="project_id" value="{{ selected_pid }}">
+          <button class="btn btn-outline-success w-100 mt-4">Zapisz</button>
+        </div>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6 class="mb-2">Zgłoszenia (zaznacz i utwórz raport)</h6>
+      <form method="post" action="{{ url_for('admin_extra_report_create') }}">
+        <div class="row g-2 align-items-end mb-2">
+          <div class="col-md-5">
+            <label class="form-label">E-mail do wysyłki (możesz zmienić)</label>
+            <input class="form-control" name="recipient_email" value="{{ contact_email or '' }}" placeholder="np. pm@firma.no">
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Tekst w raporcie (opcjonalnie)</label>
+            <input class="form-control" name="report_text" placeholder="Krótki opis dodatków / zakresu">
+          </div>
+          <div class="col-md-2">
+            <button class="btn btn-primary w-100">Utwórz raport</button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th></th><th>Data</th><th>Pracownik</th><th>Projekt</th><th>Godziny</th><th>Opis</th><th>Zdjęcia</th><th>Status</th><th class="text-end">Akcje</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rows %}
+                <tr>
+                  <td><input class="form-check-input" type="checkbox" name="req_id" value="{{ r.id }}" {% if r.status == 'INCLUDED' %}disabled{% endif %}></td>
+                  <td>{{ r.work_date.isoformat() }}</td>
+                  <td>{{ r.user.name }}</td>
+                  <td>{{ r.project.name }}</td>
+                  <td>{{ fmt(r.minutes) }}</td>
+                  <td>{{ r.description or '' }}</td>
+                  <td>
+                    {% if r.images %}
+                      {% for img in r.images %}
+                        <a href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                      {% endfor %}
+                    {% else %}-{% endif %}
+                  </td>
+                  <td><span class="badge bg-light text-dark border">{{ r.status }}</span></td>
+                  <td class="text-end text-nowrap">
+                    <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_extra_request_edit', req_id=r.id) }}">Edytuj</a>
+                    <form method="post" action="{{ url_for('admin_extra_request_delete', req_id=r.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć zgłoszenie?');">
+                      <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                    </form>
+                  </td>
+                </tr>
+              {% else %}
+                <tr><td colspan="9" class="text-muted">Brak zgłoszeń.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <input type="hidden" name="project_id" value="{{ selected_pid }}">
+      </form>
+    </div>
+  </div>
+</div>
+""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name)
+
+    return layout("Dodatki (admin)", body)
+
+
+@app.route("/admin/dodatki/request/<int:req_id>/edit", methods=["GET", "POST"])
+@login_required
+def admin_extra_request_edit(req_id):
+    require_admin()
+    r = ExtraRequest.query.get_or_404(req_id)
+
+    if request.method == "POST":
+        r.work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
+        r.minutes = parse_hhmm(request.form.get("hhmm") or "0:00")
+        r.description = (request.form.get("description") or "").strip() or None
+        db.session.commit()
+        flash("Zapisano zmiany.", "success")
+        return redirect(url_for("admin_extras", project_id=r.project_id))
+
+    body = render_template_string("""
+<div class="card p-3">
+  <h5 class="mb-3">Edytuj zgłoszenie dodatków</h5>
+  <form id="adminExtraEditForm" class="row g-2" method="post">
+    <div class="col-md-3">
+      <label class="form-label">Data</label>
+      <input class="form-control" type="date" name="work_date" value="{{ r.work_date.isoformat() }}" required>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Projekt</label>
+      <input class="form-control" value="{{ r.project.name }}" disabled>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Czas (HH:MM)</label>
+      <input class="form-control" type="text" name="hhmm" value="{{ fmt(r.minutes) }}" required>
+    </div>
+    <div class="col-12">
+      <label class="form-label">Opis</label>
+      <input class="form-control" type="text" name="description" value="{{ r.description or '' }}">
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary">Zapisz</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('admin_extras', project_id=r.project_id) }}">Wróć</a>
+    </div>
+  </form>
+</div>
+""", r=r, fmt=fmt_hhmm)
+    return layout("Edytuj dodatki", body)
+
+
+@app.route("/admin/dodatki/report/create", methods=["POST"])
+@login_required
+def admin_extra_report_create():
+    require_admin()
+    project_id = request.form.get("project_id")
+    recipient_email = (request.form.get("recipient_email") or "").strip() or None
+    report_text = (request.form.get("report_text") or "").strip() or None
+
+    ids = request.form.getlist("req_id")
+    if not ids:
+        flash("Zaznacz przynajmniej jedno zgłoszenie.", "danger")
+        return redirect(url_for("admin_extras", project_id=project_id or "all"))
+
+    # Ustal projekt: jeśli wybrano filtr, wymuszamy spójność
+    pid = None
+    if project_id and project_id != "all":
+        try:
+            pid = int(project_id)
+        except Exception:
+            pid = None
+
+    reqs = ExtraRequest.query.filter(ExtraRequest.id.in_([int(x) for x in ids])).all()
+    if not reqs:
+        flash("Nie znaleziono zgłoszeń.", "danger")
+        return redirect(url_for("admin_extras", project_id=project_id or "all"))
+
+    if pid is None:
+        pid = reqs[0].project_id
+
+    # pilnujemy, żeby raport był dla jednego projektu
+    reqs = [r for r in reqs if r.project_id == pid and r.status != "INCLUDED"]
+    if not reqs:
+        flash("Wybrane zgłoszenia są już dodane do raportu albo nie pasują do projektu.", "warning")
+        return redirect(url_for("admin_extras", project_id=pid))
+
+    # domyślny mail jeśli pusty
+    if not recipient_email:
+        recipient_email = _default_project_contact_email(pid)
+
+    rep = ExtraReport(
+        project_id=pid,
+        created_by=current_user.id,
+        recipient_email=recipient_email,
+        report_text=report_text,
+        status="DRAFT",
+    )
+    db.session.add(rep)
+    db.session.commit()
+
+    # dodaj pozycje jako snapshot
+    for r in reqs:
+        it = ExtraReportItem(
+            report_id=rep.id,
+            request_id=r.id,
+            user_name=r.user.name,
+            work_date=r.work_date,
+            minutes=r.minutes,
+            description=r.description,
+        )
+        db.session.add(it)
+        r.status = "INCLUDED"
+    db.session.commit()
+
+    flash("Utworzono raport (szkic).", "success")
+    return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
+
+
+@app.route("/admin/dodatki/request/<int:req_id>/delete", methods=["POST"])
+@login_required
+def admin_extra_request_delete(req_id):
+    require_admin()
+    r = ExtraRequest.query.get_or_404(req_id)
+
+    # Jeśli zgłoszenie jest już w raporcie, nie usuwamy wprost (żeby nie psuć historii)
+    used = ExtraReportItem.query.filter_by(request_id=r.id).first()
+    if used:
+        flash("Nie można usunąć zgłoszenia dodanego do raportu. Usuń najpierw raport.", "danger")
+        return redirect(url_for("admin_extras", project_id=r.project_id))
+
+    # usuń pliki zdjęć
+    try:
+        for img in list(r.images or []):
+            try:
+                path = extra_image_view_path(img.stored_filename)
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    db.session.delete(r)
+    db.session.commit()
+    flash("Usunięto zgłoszenie.", "success")
+    return redirect(url_for("admin_extras", project_id=r.project_id))
+
+
+@app.route("/admin/dodatki/reports", methods=["GET"])
+@login_required
+def admin_extra_reports():
+    require_admin()
+    q = ExtraReport.query.join(Project).order_by(ExtraReport.created_at.desc(), ExtraReport.id.desc()).limit(200).all()
+    # auto-accept na widoku listy, żeby admin widział status od razu
+    for rep in q:
+        try:
+            _auto_accept_if_due(rep)
+        except Exception:
+            pass
+
+    body = render_template_string("""
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-center">
+    <h5 class="mb-0">Raporty dodatków</h5>
+    <a class="btn btn-outline-secondary" href="{{ url_for('admin_extras') }}">Wróć do zgłoszeń</a>
+  </div>
+
+  <div class="table-responsive mt-3">
+    <table class="table table-sm align-middle">
+      <thead>
+        <tr>
+          <th>ID</th><th>Projekt</th><th>Status</th><th>Utworzono</th><th>Wysłano</th><th>E-mail</th><th>Suma</th><th class="text-end">Akcje</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in reps %}
+          <tr>
+            <td>#{{ r.id }}</td>
+            <td>{{ r.project.name }}</td>
+            <td><span class="badge bg-light text-dark border">{{ r.status }}</span></td>
+            <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else '' }}</td>
+            <td>{{ r.sent_at.strftime("%Y-%m-%d %H:%M") if r.sent_at else '' }}</td>
+            <td>{{ r.recipient_email or '' }}</td>
+            <td>{{ fmt(total(r)) }}</td>
+            <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_extra_report_view', report_id=r.id) }}">Otwórz</a>
+              <form method="post" action="{{ url_for('admin_extra_report_delete', report_id=r.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć raport?');">
+                <button class="btn btn-sm btn-outline-danger">Usuń</button>
+              </form>
+              {% if r.status in ['APPROVED','APPROVED_AUTO','REJECTED','COMMENTED'] %}
+                <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_extra_report_pdf', report_id=r.id) }}">PDF</a>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="text-muted">Brak raportów.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+""", reps=q, fmt=fmt_hhmm, total=_extra_report_total_minutes)
+
+    return layout("Raporty dodatków", body)
+
+
+
+
+@app.route("/admin/dodatki/report/<int:report_id>/delete", methods=["POST"])
+@login_required
+def admin_extra_report_delete(report_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+
+    # Zbierz ID zgłoszeń zanim usuniemy raport (i jego items)
+    req_ids = []
+    try:
+        req_ids = [it.request_id for it in (rep.items or []) if it and it.request_id]
+    except Exception:
+        req_ids = []
+
+    # Cofnij status zgłoszeń na NEW (żeby checkbox znowu działał)
+    if req_ids:
+        try:
+            ExtraRequest.query.filter(ExtraRequest.id.in_(req_ids)).update(
+                {"status": "NEW"},
+                synchronize_session=False
+            )
+        except Exception:
+            # fallback (bez bulk update)
+            try:
+                for rid in req_ids:
+                    req = ExtraRequest.query.get(rid)
+                    if req:
+                        req.status = "NEW"
+            except Exception:
+                pass
+
+    # Usuń pliki załączników raportu (admin attachments)
+    try:
+        for att in list(rep.attachments or []):
+            try:
+                path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Usuń raport (cascade usunie items i attachment rekordy)
+    db.session.delete(rep)
+    db.session.commit()
+
+    flash("Usunięto raport. Zgłoszenia wróciły do statusu NEW.", "success")
+    # wróć do listy zgłoszeń dla tego projektu (wygodniej)
+    try:
+        return redirect(url_for("admin_extras", project_id=rep.project_id))
+    except Exception:
+        return redirect(url_for("admin_extras"))
+
+
+@app.route("/admin/dodatki/report/<int:report_id>", methods=["GET", "POST"])
+@login_required
+def admin_extra_report_view(report_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+
+    # auto accept jeśli minęło 7 dni
+    _auto_accept_if_due(rep)
+
+    if request.method == "POST":
+        action = request.form.get("action") or "save"
+        rep.report_text = (request.form.get("report_text") or "").strip() or None
+        rep.recipient_email = (request.form.get("recipient_email") or "").strip() or None
+
+        # override sumy (opcjonalnie)
+        override = (request.form.get("total_override") or "").strip()
+        if override:
+            try:
+                rep.total_minutes_override = parse_hhmm(override)
+            except Exception:
+                rep.total_minutes_override = None
+        else:
+            rep.total_minutes_override = None
+
+        db.session.commit()
+
+        # zapis załączników admina do raportu
+        try:
+            files = request.files.getlist("attachments")
+            if files:
+                _save_extra_report_attachments(rep, files)
+        except Exception:
+            pass
+
+        if action == "send":
+            if not rep.recipient_email:
+                flash("Podaj e-mail odbiorcy.", "danger")
+                return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+            if not rep.token:
+                rep.token = _gen_token()
+            rep.status = "SENT"
+            rep.sent_at = datetime.utcnow()
+            db.session.commit()
+
+            link = url_for("extra_report_public", token=rep.token, _external=True)
+            body = (
+                f"Raport dodatków – projekt: {rep.project.name}\n\n"
+                f"Link do raportu: {link}\n\n"
+                "Ważne: raport ulega automatycznemu zatwierdzeniu po 7 dniach od daty wysłania.\n"
+            )
+            try:
+                _send_smtp_email(rep.recipient_email, f"Raport dodatków – {rep.project.name}", body)
+                flash("Wysłano e-mail z raportem.", "success")
+            except Exception as e:
+                flash(f"Nie udało się wysłać e-maila: {e}", "danger")
+
+        flash("Zapisano.", "success")
+        return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
+    link = url_for("extra_report_public", token=rep.token, _external=True) if rep.token else None
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Raport dodatków #{{ rep.id }}</h5>
+        <a class="btn btn-outline-secondary" href="{{ url_for('admin_extra_reports') }}">Lista raportów</a>
+      </div>
+      <div class="small text-muted mt-2">
+        Projekt: <strong>{{ rep.project.name }}</strong><br>
+        Status: <strong>{{ rep.status }}</strong>
+      {% if rep.attachments %}<br>Załączniki: {% for a in rep.attachments %}<a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or "plik" }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+        {% if rep.sent_at %} | Wysłano: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
+        {% if rep.decided_at %} | Decyzja: {{ rep.decided_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
+      </div>
+      {% if rep.decided_note %}
+        <div class="alert alert-info mt-2 mb-0">{{ rep.decided_note }}</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <form method="post" enctype="multipart/form-data">
+        <div class="row g-2">
+          <div class="col-md-5">
+            <label class="form-label">E-mail odbiorcy</label>
+            <input class="form-control" name="recipient_email" value="{{ rep.recipient_email or '' }}" placeholder="np. pm@firma.no">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Suma (override, opcjonalnie)</label>
+            <input class="form-control" name="total_override" value="{{ fmt(total(rep)) if rep.total_minutes_override is not none else '' }}" placeholder="np. 12:30">
+          </div>
+          <div class="col-12">
+            <label class="form-label">Treść raportu (opcjonalnie)</label>
+            <textarea class="form-control" name="report_text" rows="3" placeholder="Opis dodatków...">{{ rep.report_text or '' }}</textarea>
+            <div class="form-text">Na raporcie zawsze pokażemy informację o auto-akceptacji po 7 dniach od wysłania.</div>
+
+            <div class="mt-2">
+              <label class="form-label">Załączniki (pliki/zdjęcia do odbiorcy)</label>
+              <input class="form-control" type="file" name="attachments" multiple>
+              <div class="form-text">Limit: {{ max_attach_count }} plików, max {{ max_attach_mb }} MB / plik. Dozwolone: PDF, PNG/JPG/WEBP, DOC/DOCX, XLS/XLSX, TXT.</div>
+
+              {% if rep.attachments %}
+                <div class="mt-2">
+                  <div class="small text-muted mb-1">Dodane pliki:</div>
+                  <ul class="mb-0">
+                    {% for a in rep.attachments %}
+                      <li class="d-flex justify-content-between align-items-center gap-2">
+                        <a href="{{ url_for('admin_extra_report_attachment_download', report_id=rep.id, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or a.stored_filename }}</a>
+                        <form method="post" action="{{ url_for('admin_extra_report_attachment_delete', report_id=rep.id, att_id=a.id) }}" onsubmit="return confirm('Usunąć ten załącznik?');">
+                          <button class="btn btn-sm btn-outline-danger">Usuń</button>
+                        </form>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endif %}
+            </div>
+          </div>
+
+          <div class="col-12 d-flex gap-2">
+            <button class="btn btn-primary" name="action" value="save">Zapisz</button>
+            <button class="btn btn-outline-success" name="action" value="send">Zapisz i wyślij</button>
+            {% if link %}
+              <a class="btn btn-outline-secondary" href="{{ link }}" target="_blank" rel="noopener">Podgląd linku</a>
+            {% endif %}
+          </div>
+        </div>
+      </form>
+
+      {% if link %}
+        <hr class="my-3">
+        <div class="small">
+          Link do raportu: <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6 class="mb-2">Pozycje w raporcie</h6>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Data</th><th>Pracownik</th><th>Godziny</th><th>Opis</th><th>Zdjęcia</th></tr></thead>
+          <tbody>
+            {% for it in rep.items %}
+              <tr>
+                <td>{{ it.work_date.isoformat() }}</td>
+                <td>{{ it.user_name }}</td>
+                <td>{{ fmt(it.minutes) }}</td>
+                <td>{{ it.description or '' }}</td>
+                <td>
+                  {% if it.request and it.request.images %}
+                    {% for img in it.request.images %}
+                      <a href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                    {% endfor %}
+                  {% else %}-{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-2 fw-bold">Suma: {{ fmt(total(rep)) }}</div>
+    </div>
+  </div>
+</div>
+""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, link=link)
+
+    return layout("Raport dodatków", body)
+
+
+@app.route("/dodatki/r/<token>/att/<int:att_id>", methods=["GET"])
+def extra_report_public_attachment(token, att_id):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+    att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
+    path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
+    return send_file(path, as_attachment=True, download_name=(att.original_filename or att.stored_filename))
+
+
+@app.route("/dodatki/r/<token>", methods=["GET", "POST"])
+def extra_report_public(token):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+
+    # auto accept jeśli minęło 7 dni
+    _auto_accept_if_due(rep)
+
+    if request.method == "POST":
+        if rep.status not in ("SENT",):
+            flash("Ten raport nie oczekuje już na decyzję.", "warning")
+            return redirect(url_for("extra_report_public", token=token))
+
+        action = request.form.get("action")
+        note = (request.form.get("note") or "").strip() or None
+        rep.decided_at = datetime.utcnow()
+        rep.decided_note = note
+
+        if action == "approve":
+            rep.status = "APPROVED"
+            if not rep.decided_note:
+                rep.decided_note = "Zaakceptowano."
+        elif action == "reject":
+            rep.status = "REJECTED"
+            if not rep.decided_note:
+                rep.decided_note = "Odrzucono."
+        else:
+            rep.status = "COMMENTED"
+            if not rep.decided_note:
+                rep.decided_note = "Dodano uwagi."
+
+        db.session.commit()
+        try:
+            _notify_extra_report_status(rep, "decyzja odbiorcy")
+        except Exception:
+            pass
+        flash("Dziękujemy. Zapisano decyzję.", "success")
+        return redirect(url_for("extra_report_public", token=token))
+
+    auto_date = None
+    if rep.sent_at:
+        auto_date = (rep.sent_at + timedelta(days=7)).date()
+
+    body = render_template_string("""
+<div class="container-narrow">
+  <div class="card p-3">
+    <h5 class="mb-1">Raport dodatków</h5>
+    <div class="small text-muted">
+      Projekt: <strong>{{ rep.project.name }}</strong><br>
+      Status: <strong>{{ rep.status }}</strong>
+      {% if rep.attachments %}<br>Załączniki: {% for a in rep.attachments %}<a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or "plik" }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+      {% if rep.sent_at %}<br>Wysłano: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
+      {% if auto_date %}<br><strong>Uwaga:</strong> raport zostanie automatycznie zatwierdzony po 7 dniach od wysłania ({{ auto_date.isoformat() }}).{% endif %}
+    </div>
+
+    {% if rep.report_text %}
+      <hr class="my-3">
+      <div style="white-space:pre-wrap">{{ rep.report_text }}</div>
+    {% endif %}
+
+    <hr class="my-3">
+    <h6 class="mb-2">Pozycje</h6>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead><tr><th>Data</th><th>Pracownik</th><th>Godziny</th><th>Opis</th><th>Zdjęcia</th></tr></thead>
+        <tbody>
+          {% for it in rep.items %}
+            <tr>
+              <td>{{ it.work_date.isoformat() }}</td>
+              <td>{{ it.user_name }}</td>
+              <td>{{ fmt(it.minutes) }}</td>
+              <td>{{ it.description or '' }}</td>
+              <td>
+                {% if it.request and it.request.images %}
+                  {% for img in it.request.images %}
+                    <a href="{{ url_for('extra_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                  {% endfor %}
+                {% else %}-{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="mt-2 fw-bold">Suma: {{ fmt(total(rep)) }}</div>
+
+    {% if rep.status == 'SENT' %}
+      <hr class="my-3">
+      <form method="post" class="row g-2">
+        <div class="col-12">
+          <label class="form-label">Uwagi (opcjonalnie)</label>
+          <textarea class="form-control" name="note" rows="3" placeholder="Jeśli chcesz coś dopisać..."></textarea>
+        </div>
+        <div class="col-12 d-flex gap-2">
+          <button class="btn btn-success" name="action" value="approve">Zatwierdź</button>
+          <button class="btn btn-danger" name="action" value="reject">Odrzuć</button>
+          <button class="btn btn-outline-primary" name="action" value="comment">Dodaj uwagi</button>
+        </div>
+      </form>
+    {% else %}
+      {% if rep.decided_note %}
+        <hr class="my-3">
+        <div class="alert alert-info mb-0" style="white-space:pre-wrap">{{ rep.decided_note }}</div>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, auto_date=auto_date)
+
+    return layout("Raport dodatków", body)
+
+
+@app.route("/admin/dodatki/report/<int:report_id>/att/<int:att_id>", methods=["GET"])
+@login_required
+def admin_extra_report_attachment_download(report_id, att_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+    att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
+    path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
+    return send_file(path, as_attachment=True, download_name=(att.original_filename or att.stored_filename))
+
+
+@app.route("/admin/dodatki/report/<int:report_id>/att/<int:att_id>/delete", methods=["POST"])
+@login_required
+def admin_extra_report_attachment_delete(report_id, att_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+    att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
+    try:
+        path = os.path.join(EXTRA_REPORT_ATTACH_DIR, att.stored_filename)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+    db.session.delete(att)
+    db.session.commit()
+    flash("Usunięto załącznik.", "success")
+    return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
+
+@app.route("/admin/dodatki/report/<int:report_id>/pdf", methods=["GET"])
+@login_required
+def admin_extra_report_pdf(report_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+
+    if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
+        flash("PDF jest dostępny po decyzji (zatwierdzenie/odrzucenie/uwagi).", "warning")
+        return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+    except Exception:
+        abort(500, "Brak pakietu reportlab (dodaj do requirements).")
+
+    mem = io.BytesIO()
+    c = canvas.Canvas(mem, pagesize=A4)
+    w, h = A4
+
+    y = h - 60
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, y, f"Raport dodatków #{rep.id}")
+    y -= 22
+    c.setFont("Helvetica", 10)
+    c.drawString(50, y, f"Projekt: {rep.project.name}")
+    y -= 14
+    c.drawString(50, y, f"Status: {rep.status}")
+    y -= 14
+    if rep.sent_at:
+        c.drawString(50, y, f"Wysłano: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
+        y -= 14
+        auto_d = (rep.sent_at + timedelta(days=7)).date().isoformat()
+        c.drawString(50, y, f"Auto-akceptacja po 7 dniach: {auto_d}")
+        y -= 14
+    if rep.decided_at:
+        c.drawString(50, y, f"Decyzja: {rep.decided_at.strftime('%Y-%m-%d %H:%M')}")
+        y -= 14
+
+    if rep.report_text:
+        y -= 8
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(50, y, "Treść:")
+        y -= 14
+        c.setFont("Helvetica", 10)
+        for line in rep.report_text.splitlines():
+            if y < 80:
+                c.showPage()
+                y = h - 60
+                c.setFont("Helvetica", 10)
+            c.drawString(50, y, line[:110])
+            y -= 12
+
+    y -= 8
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(50, y, "Pozycje:")
+    y -= 14
+    c.setFont("Helvetica", 10)
+
+    for it in rep.items:
+        line = f"{it.work_date.isoformat()} | {it.user_name} | {fmt_hhmm(it.minutes)} | {(it.description or '')}"
+        # łamanie proste
+        chunks = [line[i:i+110] for i in range(0, len(line), 110)] or [line]
+        for ch in chunks:
+            if y < 80:
+                c.showPage()
+                y = h - 60
+                c.setFont("Helvetica", 10)
+            c.drawString(50, y, ch)
+            y -= 12
+
+    y -= 10
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(50, y, f"Suma: {fmt_hhmm(_extra_report_total_minutes(rep))}")
+
+    if rep.decided_note:
+        y -= 18
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(50, y, "Uwagi/Decyzja:")
+        y -= 14
+        c.setFont("Helvetica", 10)
+        for line in rep.decided_note.splitlines():
+            if y < 80:
+                c.showPage()
+                y = h - 60
+                c.setFont("Helvetica", 10)
+            c.drawString(50, y, line[:110])
+            y -= 12
+
+    c.showPage()
+    c.save()
+    mem.seek(0)
+    return send_file(mem, as_attachment=True, download_name=f"raport_dodatki_{rep.id}.pdf", mimetype="application/pdf")
+
+
+
+
+def _save_extra_report_attachments(rep: ExtraReport, files) -> int:
+    """Zapisuje załączniki admina do raportu (pliki/zdjęcia). Zwraca liczbę zapisanych plików."""
+    if not files:
+        return 0
+    os.makedirs(EXTRA_REPORT_ATTACH_DIR, exist_ok=True)
+
+    existing = len(rep.attachments or [])
+    saved = 0
+
+    for f in files:
+        if not f or not getattr(f, "filename", ""):
+            continue
+        if existing + saved >= MAX_ATTACH_COUNT:
+            break
+
+        original = f.filename
+        ext = os.path.splitext(original)[1].lower()
+        if ext not in ALLOWED_ATTACH_EXTS:
+            continue
+
+        # limit rozmiaru (jeśli da się odczytać)
+        try:
+            pos = f.stream.tell()
+            f.stream.seek(0, os.SEEK_END)
+            size = f.stream.tell()
+            f.stream.seek(pos, os.SEEK_SET)
+        except Exception:
+            size = None
+
+        if size is not None and size > MAX_ATTACH_BYTES:
+            continue
+
+        stored = f"eratt_{rep.id}_{uuid.uuid4().hex}{ext}"
+        out_path = os.path.join(EXTRA_REPORT_ATTACH_DIR, stored)
+        f.save(out_path)
+
+        att = ExtraReportAttachment(
+            report_id=rep.id,
+            stored_filename=stored,
+            original_filename=original,
+        )
+        db.session.add(att)
+        saved += 1
+
+    if saved:
+        db.session.commit()
+    return saved
+
+
+def _notify_extra_report_status(rep: ExtraReport, reason: str) -> None:
+    """Wysyła maila do admina o zmianie statusu raportu (np. podpis/odrzucenie/uwagi/auto-akcept)."""
+    notify_to = (os.getenv("REPORT_STATUS_NOTIFY_TO") or "").strip() or None
+    fallback = (os.getenv("SMTP_USER") or "").strip() or None
+
+    recipients = []
+    for r in (notify_to, fallback):
+        if r and r not in recipients:
+            recipients.append(r)
+
+    if not recipients:
+        return
+
+    admin_link = url_for("admin_extra_report_view", report_id=rep.id, _external=True)
+    public_link = url_for("extra_report_public", token=rep.token, _external=True) if rep.token else None
+
+    lines = [
+        f"Zmiana statusu raportu dodatków #{rep.id}",
+        f"Projekt: {rep.project.name}",
+        f"Status: {rep.status}",
+    ]
+    if rep.recipient_email:
+        lines.append(f"Odbiorca: {rep.recipient_email}")
+    if rep.sent_at:
+        lines.append(f"Wysłano: {rep.sent_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    if rep.decided_at:
+        lines.append(f"Decyzja: {rep.decided_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    if rep.decided_note:
+        lines.append(f"Uwagi/nota: {rep.decided_note}")
+    lines.append(f"Powód: {reason}")
+    lines.append("")
+    lines.append(f"Panel admina: {admin_link}")
+    if public_link:
+        lines.append(f"Link publiczny: {public_link}")
+
+    subject = f"[Dodatki] Status raportu #{rep.id}: {rep.status}"
+    body = "\n".join(lines)
+
+    for to in recipients:
+        try:
+            _send_smtp_email(to, subject, body)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
