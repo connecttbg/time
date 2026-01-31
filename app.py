@@ -43,6 +43,7 @@ DB_FILE = os.path.join(DATA_DIR, "app.db")
 
 # Zdjęcia do wpisów (trzymamy obok bazy, nie w static)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+EXTRA_SIG_DIR = os.path.join(UPLOAD_DIR, "extra_signatures")
 
 # Załączniki do raportów "Dodatki" (admin dodaje pliki/zdjęcia do wysyłki)
 EXTRA_REPORT_ATTACH_DIR = os.path.join(UPLOAD_DIR, "extra_report_attachments")
@@ -321,6 +322,7 @@ def require_admin():
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(EXTRA_SIG_DIR, exist_ok=True)
     os.makedirs(EXTRA_REPORT_ATTACH_DIR, exist_ok=True)
     os.makedirs(PLANS_DIR, exist_ok=True)
     with app.app_context():
@@ -635,6 +637,13 @@ def _send_smtp_email(to_email: str, subject: str, body: str):
 
 def _gen_token() -> str:
     return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _extra_report_get_decisions(report_id: int):
+    try:
+        return ExtraReportDecision.query.filter_by(report_id=report_id).order_by(ExtraReportDecision.decided_at.asc()).all()
+    except Exception:
+        return []
 
 def _extra_report_total_minutes(rep: ExtraReport) -> int:
     if rep.total_minutes_override is not None:
@@ -4572,6 +4581,7 @@ def admin_extra_report_delete(report_id):
 def admin_extra_report_view(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
+    decisions = _extra_report_get_decisions(rep.id)
     audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
     dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
@@ -4651,6 +4661,48 @@ def admin_extra_report_view(report_id):
       {% if rep.decided_note %}
         <div class="alert alert-info mt-2 mb-0">{{ rep.decided_note }}</div>
       {% endif %}
+
+      <hr class="my-3">
+      <h6 class="mb-2">Historia zmian (log)</h6>
+      <div class="row g-2">
+        <div class="col-md-6">
+          <div class="small text-muted mb-1">Decyzje klienta</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Tid</th><th>Navn</th><th>Merknad</th><th>Signatur</th></tr></thead>
+              <tbody>
+                {% for d in decisions %}
+                  <tr>
+                    <td>{{ d.decided_at.strftime("%Y-%m-%d %H:%M") if d.decided_at else "" }}</td>
+                    <td>{{ d.user_name or "" }}</td>
+                    <td>{{ d.decided_note or "" }}</td>
+                    <td>{% if d.signature_png %}<a href="{{ url_for('admin_extra_report_signature_download', report_id=rep.id, dec_id=d.id) }}" target="_blank" rel="noopener">Vis</a>{% else %}-{% endif %}</td>
+                  </tr>
+                {% endfor %}
+                {% if decisions|length == 0 %}<tr><td colspan="4" class="text-muted">Brak.</td></tr>{% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="small text-muted mb-1">Operasjoner i systemet</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Tid</th><th>Kto</th><th>Co</th></tr></thead>
+              <tbody>
+                {% for a in audit %}
+                  <tr>
+                    <td>{{ a.created_at.strftime("%Y-%m-%d %H:%M") if a.created_at else "" }}</td>
+                    <td>{{ a.user_name or "" }}</td>
+                    <td>{{ a.action or "" }}</td>
+                  </tr>
+                {% endfor %}
+                {% if audit|length == 0 %}<tr><td colspan="3" class="text-muted">Brak.</td></tr>{% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -4742,7 +4794,7 @@ def admin_extra_report_view(report_id):
     </div>
   </div>
 </div>
-""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, link=link)
+""", rep=rep, audit=audit, decisions=decisions, fmt=fmt_hhmm, total=_extra_report_total_minutes, link=link)
 
     return layout("Raport dodatków", body)
 
@@ -4831,6 +4883,8 @@ def extra_report_public(token):
 
     # auto accept jeśli minęło 7 dni
     _auto_accept_if_due(rep)
+
+    decisions = _extra_report_get_decisions(rep.id)
 
     if request.method == "POST":
         if rep.status not in ("SENT",):
@@ -5076,6 +5130,33 @@ def extra_report_public(token):
 
 @app.route("/admin/dodatki/report/<int:report_id>/att/<int:att_id>", methods=["GET"])
 @login_required
+def admin_extra_report_attachment_download(report_id, att_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+    att = ExtraReportAttachment.query.filter_by(id=att_id, report_id=rep.id).first_or_404()
+    path = os.path.join(EXTRA_ATTACH_DIR, att.stored_filename)
+    if not os.path.exists(path):
+        abort(404)
+    # Download with original filename
+    try:
+        return send_file(path, as_attachment=True, download_name=att.original_filename)
+    except TypeError:
+        # Older Werkzeug/Flask fallback
+        return send_file(path, as_attachment=True)
+
+@app.route("/admin/dodatki/report/<int:report_id>/sig/<int:dec_id>")
+@login_required
+def admin_extra_report_signature_download(report_id, dec_id):
+    require_admin()
+    rep = ExtraReport.query.get_or_404(report_id)
+    dec = ExtraReportDecision.query.filter_by(id=dec_id, report_id=rep.id).first_or_404()
+    if not dec.signature_png:
+        abort(404)
+    path = os.path.join(EXTRA_SIG_DIR, dec.signature_png)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path, as_attachment=False)
+
 def admin_extra_report_attachment_download(report_id, att_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
