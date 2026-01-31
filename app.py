@@ -1007,6 +1007,7 @@ document.addEventListener('DOMContentLoaded', function(){
 def plans():
     # Lista planów, z filtrem po projekcie
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+    users = User.query.order_by(User.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
 
     q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
@@ -1143,6 +1144,7 @@ def admin_plans():
 
 
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+    users = User.query.order_by(User.name.asc()).all()
 
     selected_pid = request.args.get("project_id", "all")
     q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
@@ -4144,7 +4146,56 @@ def admin_extras():
             flash("Zapisano kontakt do projektu.", "success")
         return redirect(url_for("admin_extras", project_id=pid))
 
+    # Dodanie nowego zgłoszenia dodatków przez admina (w imieniu pracownika)
+    if request.method == "POST" and request.form.get("action") == "add_request":
+        try:
+            pid = int(request.form.get("project_id") or "0")
+        except Exception:
+            pid = 0
+        try:
+            uid = int(request.form.get("user_id") or "0")
+        except Exception:
+            uid = 0
+
+        if not pid or not uid:
+            flash("Wybierz projekt i pracownika.", "danger")
+            return redirect(url_for("admin_extras", project_id=pid or "all"))
+
+        # data
+        try:
+            work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
+        except Exception:
+            work_date = date.today()
+
+        minutes = parse_hhmm((request.form.get("hhmm") or "").strip() or "0:00")
+        desc = (request.form.get("description") or "").strip() or None
+
+        r = ExtraRequest(
+            user_id=uid,
+            project_id=pid,
+            work_date=work_date,
+            minutes=minutes,
+            description=desc,
+            status="NEW",
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(r)
+        db.session.commit()
+
+        # zdjęcia (max 5)
+        try:
+            files = request.files.getlist("images")
+            if files:
+                _save_extra_images(r, files[:5])
+                db.session.commit()
+        except Exception:
+            pass
+
+        flash("Dodano zgłoszenie dodatków.", "success")
+        return redirect(url_for("admin_extras", project_id=pid))
+
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
+    users = User.query.order_by(User.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
 
     q = ExtraRequest.query.join(User).join(Project).filter(ExtraRequest.status != "CANCELED")
@@ -4213,6 +4264,53 @@ def admin_extras():
   </div>
 
   <div class="col-12">
+
+    <div class="card p-3">
+      <h6 class="mb-2">Dodaj zgłoszenie (admin)</h6>
+      <form class="row g-2" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="action" value="add_request">
+        <div class="col-md-3">
+          <label class="form-label">Pracownik</label>
+          <select class="form-select" name="user_id" required>
+            <option value="">Wybierz</option>
+            {% for u in users %}
+              <option value="{{ u.id }}">{{ u.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Projekt</label>
+          <select class="form-select" name="project_id" required>
+            {% for p in projects %}
+              <option value="{{ p.id }}" {% if selected_pid != 'all' and selected_pid|int == p.id %}selected{% endif %}>{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Data</label>
+          <input class="form-control" type="date" name="work_date" value="{{ (now().date()).isoformat() }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Godziny (HH:MM)</label>
+          <input class="form-control" name="hhmm" placeholder="np. 02:30" required>
+        </div>
+        <div class="col-md-12">
+          <label class="form-label">Opis</label>
+          <input class="form-control" name="description" placeholder="Opis dodatków">
+        </div>
+        <div class="col-md-12">
+          <label class="form-label">Zdjęcia (max 5)</label>
+          <input class="form-control" type="file" name="images" accept="image/*" multiple>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-outline-success w-100 mt-4">Dodaj</button>
+        </div>
+      </form>
+    </div>
+
+  </div>
+
+  <div class="col-12">
     <div class="card p-3">
       <h6 class="mb-2">Zgłoszenia (zaznacz i utwórz raport)</h6>
       <form method="post" action="{{ url_for('admin_extra_report_create') }}">
@@ -4273,7 +4371,7 @@ def admin_extras():
     </div>
   </div>
 </div>
-""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name)
+""", projects=projects, users=users, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name, now=datetime.utcnow)
 
     return layout("Dodatki (admin)", body)
 
@@ -4721,13 +4819,25 @@ def extra_report_public_attachment(token, att_id):
 def extra_report_public(token):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
 
+    # language: default Norwegian (no). Optional Polish: ?lang=pl
+    lang = (request.args.get("lang") or "no").lower().strip()
+    if lang not in ("no", "pl"):
+        lang = "no"
+
+    def tr(no_txt, pl_txt=None):
+        # Polish text optional; if not provided, reuse Norwegian
+        if lang == "pl":
+            return pl_txt if pl_txt is not None else no_txt
+        return no_txt
+
     # auto accept jeśli minęło 7 dni
     _auto_accept_if_due(rep)
 
     if request.method == "POST":
         if rep.status not in ("SENT",):
-            flash("Ten raport nie oczekuje już na decyzję.", "warning")
-            return redirect(url_for("extra_report_public", token=token))
+            flash(tr("Denne rapporten venter ikke lenger på en beslutning.",
+                     "Ten raport nie oczekuje już na decyzję."), "warning")
+            return redirect(url_for("extra_report_public", token=token, lang=lang))
 
         action = request.form.get("action")
         note = (request.form.get("note") or "").strip() or None
@@ -4737,38 +4847,56 @@ def extra_report_public(token):
         if action == "approve":
             rep.status = "APPROVED"
             if not rep.decided_note:
-                rep.decided_note = "Zaakceptowano."
+                rep.decided_note = tr("Godkjent.", "Zaakceptowano.")
         elif action == "reject":
             rep.status = "REJECTED"
             if not rep.decided_note:
-                rep.decided_note = "Odrzucono."
+                rep.decided_note = tr("Avvist.", "Odrzucono.")
         else:
             rep.status = "COMMENTED"
             if not rep.decided_note:
-                rep.decided_note = "Dodano uwagi."
+                rep.decided_note = tr("Kommentarer lagt til.", "Dodano uwagi.")
 
         db.session.commit()
         try:
             _notify_extra_report_status(rep, "decyzja odbiorcy")
         except Exception:
             pass
-        flash("Dziękujemy. Zapisano decyzję.", "success")
-        return redirect(url_for("extra_report_public", token=token))
+        flash(tr("Takk. Beslutningen er lagret.", "Dziękujemy. Zapisano decyzję."), "success")
+        return redirect(url_for("extra_report_public", token=token, lang=lang))
 
     auto_date = None
     if rep.sent_at:
         auto_date = (rep.sent_at + timedelta(days=7)).date()
 
-    body = render_template_string("""
+    # language toggle links
+    base_no = url_for("extra_report_public", token=rep.token, lang="no")
+    base_pl = url_for("extra_report_public", token=rep.token, lang="pl")
+
+    body = render_template_string(r"""
 <div class="container-narrow">
   <div class="card p-3">
-    <h5 class="mb-1">Raport dodatków</h5>
-    <div class="small text-muted">
-      Projekt: <strong>{{ rep.project.name }}</strong><br>
-      Status: <strong>{{ rep.status }}</strong>
-      {% if rep.attachments %}<br>Załączniki: {% for a in rep.attachments %}<a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or "plik" }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
-      {% if rep.sent_at %}<br>Wysłano: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
-      {% if auto_date %}<br><strong>Uwaga:</strong> raport zostanie automatycznie zatwierdzony po 7 dniach od wysłania ({{ auto_date.isoformat() }}).{% endif %}
+    <div class="d-flex justify-content-between align-items-start">
+      <div>
+        <h5 class="mb-1">{{ tr("Tilleggsrapport", "Raport dodatków") }}</h5>
+        <div class="small text-muted">
+          {{ tr("Prosjekt", "Projekt") }}: <strong>{{ rep.project.name }}</strong><br>
+          {{ tr("Status", "Status") }}: <strong>{{ rep.status }}</strong>
+          {% if rep.attachments %}
+            <br>{{ tr("Vedlegg", "Załączniki") }}:
+            {% for a in rep.attachments %}
+              <a href="{{ url_for('extra_report_public_attachment', token=rep.token, att_id=a.id) }}" target="_blank" rel="noopener">{{ a.original_filename or tr("fil", "plik") }}</a>{% if not loop.last %}, {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% if rep.sent_at %}<br>{{ tr("Sendt", "Wysłano") }}: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
+          {% if auto_date %}<br><strong>{{ tr("Merk", "Uwaga") }}:</strong> {{ tr("rapporten blir automatisk godkjent 7 dager etter sending", "raport zostanie automatycznie zatwierdzony po 7 dniach od wysłania") }} ({{ auto_date.isoformat() }}).{% endif %}
+        </div>
+      </div>
+      <div class="text-end">
+        <div class="small text-muted mb-1">{{ tr("Språk", "Język") }}:</div>
+        <a class="btn btn-sm {% if lang=='no' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ base_no }}">NO</a>
+        <a class="btn btn-sm {% if lang=='pl' %}btn-primary{% else %}btn-outline-primary{% endif %}" href="{{ base_pl }}">PL</a>
+      </div>
     </div>
 
     {% if rep.report_text %}
@@ -4777,10 +4905,18 @@ def extra_report_public(token):
     {% endif %}
 
     <hr class="my-3">
-    <h6 class="mb-2">Pozycje</h6>
+    <h6 class="mb-2">{{ tr("Linjer", "Pozycje") }}</h6>
     <div class="table-responsive">
       <table class="table table-sm align-middle">
-        <thead><tr><th>Data</th><th>Pracownik</th><th>Godziny</th><th>Opis</th><th>Zdjęcia</th></tr></thead>
+        <thead>
+          <tr>
+            <th>{{ tr("Dato", "Data") }}</th>
+            <th>{{ tr("Ansatt", "Pracownik") }}</th>
+            <th>{{ tr("Timer", "Godziny") }}</th>
+            <th>{{ tr("Beskrivelse", "Opis") }}</th>
+            <th>{{ tr("Bilder", "Zdjęcia") }}</th>
+          </tr>
+        </thead>
         <tbody>
           {% for it in rep.items %}
             <tr>
@@ -4801,19 +4937,19 @@ def extra_report_public(token):
       </table>
     </div>
 
-    <div class="mt-2 fw-bold">Suma: {{ fmt(total(rep)) }}</div>
+    <div class="mt-2 fw-bold">{{ tr("Sum", "Suma") }}: {{ fmt(total(rep)) }}</div>
 
     {% if rep.status == 'SENT' %}
       <hr class="my-3">
       <form method="post" class="row g-2">
         <div class="col-12">
-          <label class="form-label">Uwagi (opcjonalnie)</label>
-          <textarea class="form-control" name="note" rows="3" placeholder="Jeśli chcesz coś dopisać..."></textarea>
+          <label class="form-label">{{ tr("Kommentar (valgfritt)", "Uwagi (opcjonalnie)") }}</label>
+          <textarea class="form-control" name="note" rows="3" placeholder="{{ tr('Hvis du vil legge til noe...', 'Jeśli chcesz coś dopisać...') }}"></textarea>
         </div>
         <div class="col-12 d-flex gap-2">
-          <button class="btn btn-success" name="action" value="approve">Zatwierdź</button>
-          <button class="btn btn-danger" name="action" value="reject">Odrzuć</button>
-          <button class="btn btn-outline-primary" name="action" value="comment">Dodaj uwagi</button>
+          <button class="btn btn-success" name="action" value="approve">{{ tr("Godkjenn", "Zatwierdź") }}</button>
+          <button class="btn btn-danger" name="action" value="reject">{{ tr("Avvis", "Odrzuć") }}</button>
+          <button class="btn btn-outline-primary" name="action" value="comment">{{ tr("Legg til kommentar", "Dodaj uwagi") }}</button>
         </div>
       </form>
     {% else %}
@@ -4824,9 +4960,10 @@ def extra_report_public(token):
     {% endif %}
   </div>
 </div>
-""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, auto_date=auto_date)
+""", rep=rep, fmt=fmt_hhmm, total=_extra_report_total_minutes, auto_date=auto_date,
+       lang=lang, tr=tr, base_no=base_no, base_pl=base_pl)
 
-    return layout("Raport dodatków", body)
+    return layout(tr("Tilleggsrapport", "Raport dodatków"), body)
 
 
 @app.route("/admin/dodatki/report/<int:report_id>/att/<int:att_id>", methods=["GET"])
@@ -4879,18 +5016,18 @@ def admin_extra_report_pdf(report_id):
 
     y = h - 60
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(50, y, f"Raport dodatków #{rep.id}")
+    c.drawString(50, y, f"Tilleggsrapport #{rep.id}")
     y -= 22
     c.setFont("Helvetica", 10)
-    c.drawString(50, y, f"Projekt: {rep.project.name}")
+    c.drawString(50, y, f"Prosjekt: {rep.project.name}")
     y -= 14
     c.drawString(50, y, f"Status: {rep.status}")
     y -= 14
     if rep.sent_at:
-        c.drawString(50, y, f"Wysłano: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
+        c.drawString(50, y, f"Sendt: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
         y -= 14
         auto_d = (rep.sent_at + timedelta(days=7)).date().isoformat()
-        c.drawString(50, y, f"Auto-akceptacja po 7 dniach: {auto_d}")
+        c.drawString(50, y, f"Auto-godkjenning etter 7 dager: {auto_d}")
         y -= 14
     if rep.decided_at:
         c.drawString(50, y, f"Decyzja: {rep.decided_at.strftime('%Y-%m-%d %H:%M')}")
