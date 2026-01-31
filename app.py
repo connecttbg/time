@@ -6,6 +6,7 @@ import tempfile
 import errno
 import shutil
 import smtplib
+import secrets
 import uuid
 from typing import Optional
 from email.message import EmailMessage
@@ -614,26 +615,55 @@ def _upsert_project_contact(project_id: int, email: str, name: Optional[str] = N
         c.name = name or c.name
         c.is_default = True
 
-def _send_smtp_email(to_email: str, subject: str, body: str):
-    smtp_host = os.environ.get("SMTP_HOST")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_password = os.environ.get("SMTP_PASSWORD")
-    smtp_from = os.environ.get("SMTP_FROM") or smtp_user
+def _send_smtp_email(to_email, subject, body):
+    """
+    Send a simple text email. Supports both STARTTLS (587) and implicit SSL (465).
+    Required env vars:
+      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
+    Optional:
+      SMTP_SSL=1  (force SSL)
+      SMTP_STARTTLS=0 (disable starttls for non-SSL connections)
+      SMTP_FROM (defaults to SMTP_USER)
+      SMTP_FROM_NAME (defaults to "EKKO NOR AS")
+    """
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = int((os.getenv("SMTP_PORT", "587") or "587").strip())
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_pass = os.getenv("SMTP_PASSWORD", "").strip()
 
-    if not (smtp_host and smtp_port and smtp_user and smtp_password and to_email):
-        raise RuntimeError("Brak konfiguracji SMTP (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD) lub adresu docelowego.")
+    if not smtp_host or not smtp_user or not smtp_pass:
+        raise RuntimeError("Brak SMTP_HOST/SMTP_USER/SMTP_PASSWORD w zmiennych środowiskowych.")
+
+    from_email = (os.getenv("SMTP_FROM", smtp_user) or smtp_user).strip()
+    from_name = (os.getenv("SMTP_FROM_NAME", "EKKO NOR AS") or "EKKO NOR AS").strip()
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = smtp_from
+    msg["From"] = f"{from_name} <{from_email}>"
     msg["To"] = to_email
     msg.set_content(body)
 
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_password)
+    use_ssl = os.getenv("SMTP_SSL", "").lower() in ("1", "true", "yes") or smtp_port == 465
+    use_starttls = os.getenv("SMTP_STARTTLS", "1").lower() not in ("0", "false", "no")
+
+    if use_ssl:
+        server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+    else:
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+
+    try:
+        if (not use_ssl) and use_starttls:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        server.login(smtp_user, smtp_pass)
         server.send_message(msg)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
 
 def _gen_token() -> str:
     return uuid.uuid4().hex + uuid.uuid4().hex
@@ -852,6 +882,7 @@ def dashboard():
         return redirect(url_for("dashboard"))
 
     projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
+    employees = User.query.order_by(User.name).all()
     today = date.today()
     m_from, m_to = month_bounds(today)
     entries = (
@@ -1048,6 +1079,7 @@ def plans():
     # Lista planów, z filtrem po projekcie
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
+    selected_pid_int = int(selected_pid) if str(selected_pid).isdigit() else 0
 
     q = Plan.query.join(Project).order_by(Plan.uploaded_at.desc(), Plan.id.desc())
     if selected_pid != "all":
@@ -2531,6 +2563,7 @@ def admin_reports_export():
     d_to = request.args.get("to")
     user_id = request.args.get("user_id", "all")
     project_id = request.args.get("project_id", "all")
+    today = date.today().isoformat()
     if not d_from or not d_to:
         abort(400)
 
@@ -4173,6 +4206,8 @@ def extra_image_view(image_id):
 def admin_extras():
     require_admin()
 
+    today = date.today()
+
     # Ustawienie maila kontaktowego per projekt (opcjonalnie)
     if request.method == "POST" and request.form.get("action") == "save_contact":
         pid = int(request.form.get("project_id") or "0")
@@ -4184,15 +4219,66 @@ def admin_extras():
             flash("Zapisano kontakt do projektu.", "success")
         return redirect(url_for("admin_extras", project_id=pid))
 
+
+    # Dodawanie dodatku przez admina (jakby pracownik)
+    if request.method == "POST" and request.form.get("action") == "admin_add_request":
+        pid = int(request.form.get("project_id") or "0")
+        uid = int(request.form.get("user_id") or "0")
+        work_date_str = (request.form.get("work_date") or "").strip()
+        minutes = parse_hhmm(request.form.get("minutes") or "0")
+        desc = (request.form.get("description") or "").strip()
+
+        if not pid or not uid:
+            flash("Wybierz projekt i pracownika.", "warning")
+            return redirect(url_for("admin_extras", project_id=pid or "all"))
+
+        # data (YYYY-MM-DD)
+        if work_date_str:
+            try:
+                work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
+            except Exception:
+                flash("Nieprawidłowa data.", "warning")
+                return redirect(url_for("admin_extras", project_id=pid))
+        else:
+            work_date = date.today()
+
+        if minutes <= 0:
+            flash("Podaj czas (np. 01:30).", "warning")
+            return redirect(url_for("admin_extras", project_id=pid))
+
+        req = ExtraRequest(
+            user_id=uid,
+            project_id=pid,
+            work_date=work_date,
+            minutes=minutes,
+            description=desc,
+            status="NEW",
+        )
+        db.session.add(req)
+        db.session.commit()
+
+        # zdjęcia (opcjonalnie)
+        try:
+            files = request.files.getlist("images") if "images" in request.files else []
+            _save_extra_images(req.id, files)
+        except Exception as e:
+            flash(f"Nie udało się zapisać zdjęć: {e}", "warning")
+
+        flash("Dodatek został dodany.", "success")
+        return redirect(url_for("admin_extras", project_id=pid))
+
     projects = Project.query.order_by(Project.is_active.desc(), Project.name.asc()).all()
     selected_pid = request.args.get("project_id", "all")
+    selected_pid_int = None
 
     q = ExtraRequest.query.join(User).join(Project).filter(ExtraRequest.status != "CANCELED")
     if selected_pid != "all":
         try:
-            q = q.filter(ExtraRequest.project_id == int(selected_pid))
+            selected_pid_int = int(selected_pid)
+            q = q.filter(ExtraRequest.project_id == selected_pid_int)
         except Exception:
             selected_pid = "all"
+            selected_pid_int = None
 
     rows = q.order_by(ExtraRequest.created_at.desc(), ExtraRequest.id.desc()).limit(300).all()
 
@@ -4208,6 +4294,9 @@ def admin_extras():
         except Exception:
             pass
 
+    
+    # lista pracowników do dodawania dodatków przez admina
+    employees = User.query.order_by(User.name.asc()).all()
     body = render_template_string("""
 <div class="row g-3">
   <div class="col-12">
@@ -4254,7 +4343,52 @@ def admin_extras():
 
   <div class="col-12">
     <div class="card p-3">
-      <h6 class="mb-2">Zgłoszenia (zaznacz i utwórz raport)</h6>
+      <h6 class="mb-2">
+        <div class="card mb-3 p-3">
+          <h5>Dodaj dodatek (admin)</h5>
+          <form method="post" enctype="multipart/form-data" class="mt-2">
+            <input type="hidden" name="action" value="admin_add_request">
+            <div class="row g-2">
+              <div class="col-md-3">
+                <label class="form-label">Pracownik</label>
+                <select name="user_id" class="form-select" required>
+                  <option value="">-- wybierz --</option>
+                  {% for u in employees %}
+                    <option value="{{u.id}}">{{u.name}}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Projekt</label>
+                <select name="project_id" class="form-select" required>
+                  <option value="">-- wybierz --</option>
+                  {% for p in projects %}
+                    <option value="{{p.id}}" {% if p.id==selected_pid_int %}selected{% endif %}>{{p.name}}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Data</label>
+                <input type="date" name="work_date" class="form-control" value="{{today}}">
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Godziny</label>
+                <input type="text" name="minutes" class="form-control" placeholder="np. 01:30" required>
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Zdjęcia</label>
+                <input type="file" name="images" class="form-control" multiple accept="image/*">
+              </div>
+            </div>
+            <div class="mt-2">
+              <label class="form-label">Opis</label>
+              <input type="text" name="description" class="form-control" placeholder="Opis (opcjonalnie)">
+            </div>
+            <button class="btn btn-success mt-2" type="submit">Dodaj</button>
+          </form>
+        </div>
+
+Zgłoszenia (zaznacz i utwórz raport)</h6>
       <form method="post" action="{{ url_for('admin_extra_report_create') }}">
         <div class="row g-2 align-items-end mb-2">
           <div class="col-md-5">
@@ -4313,7 +4447,7 @@ def admin_extras():
     </div>
   </div>
 </div>
-""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name)
+""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name, employees=employees, today=today, selected_pid_int=selected_pid_int)
 
     return layout("Dodatki (admin)", body)
 
@@ -4618,28 +4752,32 @@ def admin_extra_report_view(report_id):
 
         if action == "send":
             if not rep.recipient_email:
-                flash("Podaj e-mail odbiorcy.", "danger")
+                flash("Podaj e-mail odbiorcy przed wysyłką.", "warning")
                 return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
             if not rep.token:
-                rep.token = _gen_token()
+                rep.token = secrets.token_hex(32)
+
             rep.status = "SENT"
             rep.sent_at = datetime.utcnow()
+            rep.updated_at = datetime.utcnow()
             db.session.commit()
 
             link = url_for("extra_report_public", token=rep.token, _external=True)
-            body = (
-                f"Raport dodatków – projekt: {rep.project.name}\n\n"
-                f"Link do raportu: {link}\n\n"
-                "Ważne: raport ulega automatycznemu zatwierdzeniu po 7 dniach od daty wysłania.\n"
-            )
+            subject = "Tilleggsrapport fra EKKO NOR AS"
+            mail_body = f"Hei!\n\nDu har mottatt en tilleggsrapport fra EKKO NOR AS.\n\nÅpne rapporten her:\n{link}\n\nMvh\nEKKO NOR AS\n"
             try:
-                _send_smtp_email(rep.recipient_email, f"Raport dodatków – {rep.project.name}", body)
-                flash("Wysłano e-mail z raportem.", "success")
+                _send_email_smtp(rep.recipient_email, subject, mail_body)
+                flash("Wysłano raport. Link został wysłany e-mailem.", "success")
             except Exception as e:
-                flash(f"Nie udało się wysłać e-maila: {e}", "danger")
+                flash(f"Nie udało się wysłać maila: {e}", "danger")
+
+            return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
         flash("Zapisano.", "success")
         return redirect(url_for("admin_extra_report_view", report_id=rep.id))
+
+
 
     link = url_for("extra_report_public", token=rep.token, _external=True) if rep.token else None
 
