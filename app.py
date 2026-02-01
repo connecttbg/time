@@ -18,6 +18,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_
 
+APP_VERSION = "v30"
+
+
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
 from PIL import Image
 from PIL.ImageOps import exif_transpose
@@ -328,6 +331,7 @@ def ensure_db_file():
     os.makedirs(PLANS_DIR, exist_ok=True)
     with app.app_context():
         db.create_all()
+        _try_add_column('extra_requests', 'category', 'TEXT')
         try:
             db.session.execute(sql_text("SELECT 1"))
         except Exception:
@@ -454,6 +458,17 @@ def _delete_entry_images_files(entry):
 
 
 # --- Init DB (safe) ---
+
+
+def _try_add_column(table: str, column: str, coltype: str = "TEXT"):
+    """Best-effort SQLite schema tweak (no migrations)."""
+    try:
+        cols = [r[1] for r in db.session.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+        if column not in cols:
+            db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
 def init_db():
     ensure_db_file()
     with app.app_context():
@@ -551,6 +566,7 @@ BASE = """
 
         <div class="d-flex flex-column flex-lg-row gap-2 align-items-start align-items-lg-center">
           <span class="text-muted small">{{ current_user.name }}</span>
+          <span class="badge bg-secondary">{{ app_version }}</span>
           <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
         </div>
       </div>
@@ -567,7 +583,7 @@ BASE = """
   {{ body|safe }}
 </div>
 
-<div class="text-center mt-4 text-muted" style="font-size:12px;">aplikacja utworzona przez dataconnect.no</div>
+<div class="text-center mt-4 text-muted" style="font-size:12px; line-height:1.4;">Ekko Nor AS<br>Bruseveien 8A<br>1911 Flateby<br><br>Admin: dataconnect.no</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
@@ -585,7 +601,7 @@ function limitFiles(input, max){
 """
 
 def layout(title, body):
-    return render_template_string(BASE, title=title, body=body, fmt=fmt_hhmm)
+    return render_template_string(BASE, title=title, body=body, fmt=fmt_hhmm, app_version=APP_VERSION)
 
 
 
@@ -596,6 +612,14 @@ def logout():
     logout_user()
     return redirect(url_for("login"))
 
+
+EXTRA_CATEGORIES = [
+    ("arbeid", "Arbeid"),
+    ("material", "Materialer"),
+    ("transport", "Transport"),
+    ("leie", "Leie/utstyr"),
+    ("annet", "Annet"),
+]
 
 # --- Dodatki: pomocnicze ---
 def _default_project_contact_email(project_id: int) -> Optional[str]:
@@ -1163,6 +1187,7 @@ def admin_plans():
     if request.method == "POST":
         project_id = int(request.form.get("project_id"))
         title = (request.form.get("title") or "").strip()
+        category = (request.form.get("category") or "annet").strip() or "annet"
         files = request.files.getlist("pdfs")
 
         if not files or not any(getattr(x, "filename", "") for x in files):
@@ -4028,7 +4053,7 @@ def extras():
     </div>
   </div>
 </div>
-""", projects=projects, my=my, fmt=fmt_hhmm, date=date)
+""", projects=projects, my=my, fmt=fmt_hhmm, date=date, categories=EXTRA_CATEGORIES)
 
     return layout("Dodatki", body)
 
@@ -4718,6 +4743,8 @@ def admin_extra_report_view(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
     decisions = _extra_report_get_decisions(rep.id)
+    admin_atts = ExtraReportAttachment.query.filter_by(report_id=rep.id).order_by(ExtraReportAttachment.id.desc()).all()
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).all()
     audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
     dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
 
@@ -5025,6 +5052,8 @@ def extra_report_public(token):
     _auto_accept_if_due(rep)
 
     decisions = _extra_report_get_decisions(rep.id)
+    admin_atts = ExtraReportAttachment.query.filter_by(report_id=rep.id).order_by(ExtraReportAttachment.id.desc()).all()
+    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).all()
 
     if request.method == "POST":
         if rep.status not in ("SENT",):
@@ -5062,6 +5091,7 @@ def extra_report_public(token):
             dec.decided_at = rep.decided_at
             dec.decided_note = rep.decided_note
             dec.decided_name = sign_name or ""
+            dec.user_name = (sign_name or "Klient")
             dec.work_date = date.today()
             dec.minutes = 0
             fn = _save_signature_png(signature_data) if signature_data else None
@@ -5262,7 +5292,8 @@ def extra_report_public(token):
     {% endif %}
   </div>
 </div>
-""", rep=rep, fmt=fmt_hhmm, total_minutes=_extra_report_total_minutes, auto_date=auto_date,
+""", rep=rep, decisions=decisions, audit=audit, admin_atts=admin_atts,
+       fmt=fmt_hhmm, total_minutes=_extra_report_total_minutes, auto_date=auto_date,
        lang=lang, tr=tr, base_no=base_no, base_pl=base_pl)
 
     return layout(tr("Tilleggsrapport", "Raport dodatków"), body)
@@ -5575,6 +5606,100 @@ def _save_signature_png(data_url):
 
 # --- Init DB after all models/routes are defined ---
 init_db()
+
+
+
+@app.route("/dodatki/r/<token>/pdf", methods=["GET"])
+def extra_report_public_pdf(token):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+    # only after client decision (accepted/rejected) or when admin already sent it
+    if rep.status not in ("accepted", "rejected", "sent"):
+        flash("PDF będzie dostępny po akceptacji/odrzuceniu.", "warning")
+        return redirect(url_for("extra_report_public", token=token))
+
+    lang = (request.args.get("lang") or rep.lang or "no").strip().lower()
+    if lang not in ("no", "pl"):
+        lang = "no"
+
+    # reuse the same PDF generator as admin
+    # we call the admin function body logic by duplicating minimal parts
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib import colors
+    from io import BytesIO
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+
+    tr = _tr_no if lang == "no" else _tr_pl
+    fmt = fmt_hhmm
+
+    y = h - 20*mm
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(20*mm, y, tr("Ekstra rapport", "Raport dodatków"))
+    y -= 8*mm
+
+    c.setFont("Helvetica", 10)
+    c.drawString(20*mm, y, f"{tr('Prosjekt', 'Projekt')}: {rep.project.name if rep.project else '-'}")
+    y -= 5*mm
+    c.drawString(20*mm, y, f"{tr('Dato', 'Data')}: {rep.created_at.date().isoformat() if rep.created_at else ''}")
+    y -= 8*mm
+
+    # items
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(20*mm, y, tr("Linjer", "Pozycje"))
+    y -= 6*mm
+
+    c.setFont("Helvetica", 9)
+    items = ExtraReportItem.query.filter_by(report_id=rep.id).order_by(ExtraReportItem.id.asc()).all()
+    total = 0
+    for it in items:
+        if y < 30*mm:
+            c.showPage()
+            y = h - 20*mm
+            c.setFont("Helvetica", 9)
+        line = f"{it.work_date.isoformat() if it.work_date else ''} | {it.user_name or ''} | {it.title or ''} | {fmt(it.minutes or 0)}"
+        c.drawString(20*mm, y, line[:110])
+        y -= 5*mm
+        total += int(it.minutes or 0)
+
+    y -= 4*mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(20*mm, y, f"{tr('Sum', 'Suma')}: {fmt(total)}")
+    y -= 10*mm
+
+    # decision + signature
+    decisions = _extra_report_get_decisions(rep.id)
+    if decisions:
+        d = decisions[0]
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(20*mm, y, tr("Signatur", "Podpis"))
+        y -= 6*mm
+        c.setFont("Helvetica", 9)
+        c.drawString(20*mm, y, f"{tr('Navn', 'Imię i nazwisko')}: {d.decided_name or d.user_name or ''}")
+        y -= 5*mm
+        if d.decided_note:
+            c.drawString(20*mm, y, (tr("Kommentar", "Komentarz") + ": " + d.decided_note)[:110])
+            y -= 5*mm
+        if d.signature_png:
+            sig_path = os.path.join(EXTRA_REPORT_SIG_DIR, d.signature_png)
+            if os.path.exists(sig_path):
+                try:
+                    img = ImageReader(sig_path)
+                    c.drawImage(img, 20*mm, y-35*mm, width=80*mm, height=30*mm, preserveAspectRatio=True, mask='auto')
+                    y -= 40*mm
+                except Exception:
+                    pass
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return send_file(buf, mimetype="application/pdf", as_attachment=False,
+                     download_name=f"ekstra_rapport_{rep.id}.pdf")
+
 
 if __name__ == "__main__":
     ensure_db_file()
