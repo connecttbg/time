@@ -4430,9 +4430,7 @@ Zgłoszenia (zaznacz i utwórz raport)</h6>
                   <td><span class="badge bg-light text-dark border">{{ r.status }}</span></td>
                   <td class="text-end text-nowrap">
                     <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_extra_request_edit', req_id=r.id) }}">Edytuj</a>
-                    <form method="post" action="{{ url_for('admin_extra_request_delete', req_id=r.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć zgłoszenie?');">
-                      <button class="btn btn-sm btn-outline-danger">Usuń</button>
-                    </form>
+                    <button class="btn btn-sm btn-outline-danger" type="submit" formmethod="post" formaction="{{ url_for('admin_extra_request_delete', req_id=r.id) }}" onclick="return confirm('Usunąć zgłoszenie?');">Usuń</button>
                   </td>
                 </tr>
               {% else %}
@@ -4570,11 +4568,14 @@ def admin_extra_request_delete(req_id):
     require_admin()
     r = ExtraRequest.query.get_or_404(req_id)
 
-    # Jeśli zgłoszenie jest już w raporcie, nie usuwamy wprost (żeby nie psuć historii)
-    used = ExtraReportItem.query.filter_by(request_id=r.id).first()
-    if used:
-        flash("Nie można usunąć zgłoszenia dodanego do raportu. Usuń najpierw raport.", "danger")
-        return redirect(url_for("admin_extras", project_id=r.project_id))
+    # Jeśli zgłoszenie było już użyte w raporcie, usuń też powiązania (żeby admin mógł faktycznie skasować wpis)
+    linked_items = ExtraReportItem.query.filter_by(request_id=r.id).all()
+    if linked_items:
+        for it in linked_items:
+            try:
+                db.session.delete(it)
+            except Exception:
+                pass
 
     # usuń pliki zdjęć
     try:
@@ -4592,6 +4593,7 @@ def admin_extra_request_delete(req_id):
     db.session.commit()
     flash("Usunięto zgłoszenie.", "success")
     return redirect(url_for("admin_extras", project_id=r.project_id))
+
 
 
 @app.route("/admin/dodatki/reports", methods=["GET"])
