@@ -5707,3 +5707,56 @@ def extra_report_public_pdf(token):
 if __name__ == "__main__":
     ensure_db_file()
     app.run(debug=True, host="0.0.0.0")
+# =========================
+# SMTP helper (added)
+# Fix for: NameError: _send_email_smtp is not defined
+# =========================
+def _send_email_smtp(to, subject, body, attachments=None):
+    """Send an email using SMTP over SSL.
+
+    This function is intentionally simple and uses environment variables on Render.
+    Required ENV (or app.config fallbacks):
+      - SMTP_HOST
+      - SMTP_PORT (default 465)
+      - SMTP_USER
+      - SMTP_PASSWORD
+      - MAIL_FROM (defaults to SMTP_USER)
+    """
+    smtp_host = os.getenv("SMTP_HOST", getattr(app, "config", {}).get("SMTP_HOST"))
+    smtp_port = int(os.getenv("SMTP_PORT", getattr(app, "config", {}).get("SMTP_PORT", 465)))
+    smtp_user = os.getenv("SMTP_USER", getattr(app, "config", {}).get("SMTP_USER"))
+    smtp_pass = os.getenv("SMTP_PASSWORD", getattr(app, "config", {}).get("SMTP_PASSWORD"))
+    mail_from = os.getenv("MAIL_FROM", getattr(app, "config", {}).get("MAIL_FROM", smtp_user))
+
+    if not smtp_host or not smtp_user or not smtp_pass or not mail_from:
+        raise RuntimeError("Brak konfiguracji SMTP (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/MAIL_FROM).")
+
+    msg = EmailMessage()
+    msg["From"] = mail_from
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body or "")
+
+    if attachments:
+        for p in attachments:
+            if not p:
+                continue
+            try:
+                if not os.path.exists(p):
+                    continue
+                with open(p, "rb") as f:
+                    data = f.read()
+                filename = os.path.basename(p)
+                msg.add_attachment(
+                    data,
+                    maintype="application",
+                    subtype="octet-stream",
+                    filename=filename
+                )
+            except Exception:
+                # Don't fail the whole email if a single attachment is missing/unreadable
+                continue
+
+    with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
