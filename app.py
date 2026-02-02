@@ -5712,24 +5712,30 @@ if __name__ == "__main__":
 # Fix for: NameError: _send_email_smtp is not defined
 # =========================
 def _send_email_smtp(to, subject, body, attachments=None):
-    """Send an email using SMTP over SSL.
-
-    This function is intentionally simple and uses environment variables on Render.
-    Required ENV (or app.config fallbacks):
-      - SMTP_HOST
-      - SMTP_PORT (default 465)
-      - SMTP_USER
-      - SMTP_PASSWORD
-      - MAIL_FROM (defaults to SMTP_USER)
     """
-    smtp_host = os.getenv("SMTP_HOST", getattr(app, "config", {}).get("SMTP_HOST"))
-    smtp_port = int(os.getenv("SMTP_PORT", getattr(app, "config", {}).get("SMTP_PORT", 465)))
-    smtp_user = os.getenv("SMTP_USER", getattr(app, "config", {}).get("SMTP_USER"))
-    smtp_pass = os.getenv("SMTP_PASSWORD", getattr(app, "config", {}).get("SMTP_PASSWORD"))
-    mail_from = os.getenv("MAIL_FROM", getattr(app, "config", {}).get("MAIL_FROM", smtp_user))
+    Wysyłka maila SMTP (Render / ENV), obsługuje SSL (465) i STARTTLS (587).
+
+    ENV (zalecane na Render):
+      SMTP_HOST
+      SMTP_PORT  (465 dla SSL lub 587 dla STARTTLS)
+      SMTP_USER
+      SMTP_PASSWORD
+      MAIL_FROM  (opcjonalnie)
+      SMTP_STARTTLS (opcjonalnie: "1" wymusza STARTTLS)
+      SMTP_SSL (opcjonalnie: "1" wymusza SMTP_SSL)
+    """
+
+    smtp_host = os.getenv("SMTP_HOST", app.config.get("SMTP_HOST"))
+    smtp_port = int(os.getenv("SMTP_PORT", app.config.get("SMTP_PORT", 465)))
+    smtp_user = os.getenv("SMTP_USER", app.config.get("SMTP_USER"))
+    smtp_pass = os.getenv("SMTP_PASSWORD", app.config.get("SMTP_PASSWORD"))
+    mail_from = os.getenv("MAIL_FROM", app.config.get("MAIL_FROM", smtp_user))
+
+    force_starttls = os.getenv("SMTP_STARTTLS", "").strip() in ("1", "true", "True", "yes", "YES")
+    force_ssl = os.getenv("SMTP_SSL", "").strip() in ("1", "true", "True", "yes", "YES")
 
     if not smtp_host or not smtp_user or not smtp_pass or not mail_from:
-        raise RuntimeError("Brak konfiguracji SMTP (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/MAIL_FROM).")
+        raise RuntimeError("Brak konfiguracji SMTP (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/MAIL_FROM)")
 
     msg = EmailMessage()
     msg["From"] = mail_from
@@ -5738,25 +5744,34 @@ def _send_email_smtp(to, subject, body, attachments=None):
     msg.set_content(body or "")
 
     if attachments:
-        for p in attachments:
-            if not p:
+        for path in attachments:
+            if not path or not os.path.exists(path):
                 continue
-            try:
-                if not os.path.exists(p):
-                    continue
-                with open(p, "rb") as f:
-                    data = f.read()
-                filename = os.path.basename(p)
-                msg.add_attachment(
-                    data,
-                    maintype="application",
-                    subtype="octet-stream",
-                    filename=filename
-                )
-            except Exception:
-                # Don't fail the whole email if a single attachment is missing/unreadable
-                continue
+            with open(path, "rb") as f:
+                data = f.read()
+            filename = os.path.basename(path)
+            msg.add_attachment(
+                data,
+                maintype="application",
+                subtype="octet-stream",
+                filename=filename,
+            )
 
-    with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
+    # Heurystyka:
+    # - port 465 => SSL
+    # - port 587/25 => STARTTLS (jeśli dostępne)
+    use_ssl = force_ssl or (smtp_port == 465 and not force_starttls)
+    use_starttls = force_starttls or (smtp_port in (587, 25) and not use_ssl)
+
+    if use_ssl:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.ehlo()
+            if use_starttls:
+                server.starttls()
+                server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
