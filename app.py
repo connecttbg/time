@@ -2363,6 +2363,7 @@ def admin_backup_email():
             server.send_message(msg)
         flash(f"Wysłano kopię zapasową na adres: {backup_to}", "success")
     except Exception as e:
+        db.session.rollback()
         flash(f"Nie udało się wysłać kopii zapasowej: {e}", "danger")
 
     return redirect(url_for("admin_backup"))
@@ -4285,8 +4286,10 @@ def admin_extras():
         # zdjęcia (opcjonalnie)
         try:
             files = request.files.getlist("images") if "images" in request.files else []
-            _save_extra_images(req.id, files)
+            _save_extra_images(req, files)
+            db.session.commit()
         except Exception as e:
+            db.session.rollback()
             flash(f"Nie udało się zapisać zdjęć: {e}", "warning")
 
         flash("Dodatek został dodany.", "success")
