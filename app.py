@@ -1005,6 +1005,7 @@ def dashboard():
                   {% for img in e.images %}
                     <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
                   {% endfor %}
+                  </div>
                 {% else %}-{% endif %}
               </td>
               <td>{{ fmt(e.minutes) }}</td>
@@ -4797,9 +4798,66 @@ def admin_extra_report_view(report_id):
 
             link = url_for("extra_report_public", token=rep.token, _external=True)
             subject = "Tilleggsrapport fra EKKO NOR AS"
-            mail_body = f"Hei!\n\nDu har mottatt en tilleggsrapport fra EKKO NOR AS.\n\nÅpne rapporten her:\n{link}\n\nMvh\nEKKO NOR AS\n"
+
+            # informacja o auto-akceptacji po 7 dniach (w treści maila)
+
+            auto_deadline = None
+
+            if rep.sent_at:
+
+                try:
+
+                    auto_deadline = (rep.sent_at + timedelta(days=7)).date().isoformat()
+
+                except Exception:
+
+                    auto_deadline = None
+
+
+            base_url = link.split("/dodatki/r/")[0] if "/dodatki/r/" in link else link.rsplit("/", 1)[0]
+
+            logo_url = base_url.rstrip("/") + "/static/img/logo.png"
+
+            deadline_txt = ("innen " + auto_deadline) if auto_deadline else "innen 7 dager"
+
+
+            text_body = (
+
+                "Hei!\n\n"
+
+                "I lenken nedenfor sender vi dere rapporten.\n\n"
+
+                f"Vennligst godkjenn {deadline_txt}. Dersom vi ikke mottar tilbakemelding innen fristen, vil rapporten bli automatisk godkjent.\n\n"
+
+                "Åpne rapporten her:\n"
+
+                f"{link}\n\n"
+
+                "Ta gjerne kontakt dersom dere har spørsmål eller merknader.\n\n"
+
+                "Med vennlig hilsen\nEKKO NOR AS\n"
+
+            )
+
+
+            html_body = f'''<!doctype html>
+<html><body style=\"font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;\">
+  <div style=\"max-width:640px;margin:0 auto;\">
+    <img src=\"{logo_url}\" alt=\"EKKO NOR AS\" style=\"max-width:220px;height:auto;display:block;margin:0 0 16px 0;\">
+    <p>Hei!</p>
+    <p>I lenken nedenfor sender vi dere rapporten.</p>
+    <p><strong>Vennligst godkjenn {deadline_txt}</strong>. Dersom vi ikke mottar tilbakemelding innen fristen, vil rapporten bli automatisk godkjent.</p>
+    <p><a href=\"{link}\" style=\"display:inline-block;padding:10px 14px;background:#0d6efd;color:#fff;text-decoration:none;border-radius:6px;\">Åpne rapport</a></p>
+    <p>Hvis knappen ikke fungerer, bruk denne lenken:<br><a href=\"{link}\">{link}</a></p>
+    <p>Ta gjerne kontakt dersom dere har spørsmål eller merknader.</p>
+    <p>Med vennlig hilsen<br><strong>EKKO NOR AS</strong></p>
+  </div>
+</body></html>'''
+
+
             try:
-                _send_email_smtp(rep.recipient_email, subject, mail_body)
+
+                _send_email_smtp(rep.recipient_email, subject, {"text": text_body, "html": html_body})
                 flash("Wysłano raport. Link został wysłany e-mailem.", "success")
             except Exception as e:
                 flash(f"Nie udało się wysłać maila: {e}", "danger")
@@ -5130,7 +5188,18 @@ def extra_report_public(token):
 
     body = render_template_string(r"""
 <div class="container-narrow">
+  <style>
+    .report-head{display:flex;gap:16px;align-items:flex-start;margin-bottom:12px;}
+    .report-head img{max-width:220px;height:auto;}
+    .thumbs img{width:90px;height:70px;object-fit:cover;border-radius:6px;border:1px solid #ddd;}
+  </style>
   <div class="card p-3">
+    <div class="report-head">
+      <div><img src="{{ url_for('static', filename='img/logo.png') }}" alt="EKKO NOR AS"></div>
+      <div class="flex-grow-1">
+        <div class="small text-muted mb-1">EKKO NOR AS</div>
+      </div>
+    </div>
     <div class="d-flex justify-content-between align-items-start">
       <div>
         <h5 class="mb-1">{{ tr("Tilleggsrapport", "Raport dodatków") }}</h5>
@@ -5176,8 +5245,9 @@ def extra_report_public(token):
               <td>
                 {% if it.request and it.request.images %}
                   {% for img in it.request.images %}
-                    <a href="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
+                    <a href="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" target="_blank" rel="noopener" style="display:inline-block;margin-right:6px;"><img src="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" alt="img" style="width:90px;height:70px;object-fit:cover;border-radius:6px;border:1px solid #ddd;"></a>
                   {% endfor %}
+                  </div>
                 {% else %}-{% endif %}
               </td>
             </tr>
@@ -5383,9 +5453,22 @@ def admin_extra_report_pdf(report_id):
     c = canvas.Canvas(mem, pagesize=A4)
     w, h = A4
 
+    # Logo (duże, lewy górny róg)
+    logo_path = os.path.join(BASE_DIR, "static", "img", "logo.png")
+    logo_w = 140
+    logo_h = 45
+    text_x = 50
+    if os.path.exists(logo_path):
+        try:
+            from reportlab.lib.utils import ImageReader
+            c.drawImage(ImageReader(logo_path), 50, h - 70, width=logo_w, height=logo_h, mask='auto', preserveAspectRatio=True)
+            text_x = 50 + logo_w + 20
+        except Exception:
+            text_x = 50
+
     y = h - 60
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(50, y, f"Raport dodatków #{rep.id}")
+    c.drawString(text_x, y, f"Raport dodatków #{rep.id}")
     y -= 22
     c.setFont("Helvetica", 10)
     c.drawString(50, y, f"Projekt: {rep.project.name}")
@@ -5741,7 +5824,15 @@ def _send_email_smtp(to, subject, body, attachments=None):
     msg["From"] = mail_from
     msg["To"] = to
     msg["Subject"] = subject
-    msg.set_content(body or "")
+        # body może być str (tekst) albo dict {'text':..., 'html':...}
+    if isinstance(body, dict):
+        text_body = (body.get('text') or '').strip()
+        html_body = (body.get('html') or '').strip()
+        msg.set_content(text_body)
+        if html_body:
+            msg.add_alternative(html_body, subtype='html')
+    else:
+        msg.set_content(body or "")
 
     if attachments:
         for path in attachments:
