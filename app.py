@@ -18,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_
 
-APP_VERSION = "v30"
+APP_VERSION = "v31"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -550,18 +550,15 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_plans') }}">Plany</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
+<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
+<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
           {% else %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_costs') }}">Koszty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
-          {% endif %}
+{% endif %}
         </ul>
 
         <div class="d-flex flex-column flex-lg-row gap-2 align-items-start align-items-lg-center">
