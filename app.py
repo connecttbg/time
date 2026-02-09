@@ -545,11 +545,13 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_overview') }}">Admin</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Pracownicy</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for(\'admin_plans\') }}">Plany (PDF)</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_plans') }}">Plany (PDF)</a></li>
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Plany</a></li>
+            
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
           {% else %}
@@ -558,6 +560,7 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('user_costs') }}">Koszty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
 {% endif %}
         </ul>
 
