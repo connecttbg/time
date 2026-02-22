@@ -16,9 +16,9 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user, UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from sqlalchemy import text as sql_text, and_
+from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v31"
+APP_VERSION = "v32"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -106,6 +106,7 @@ class Project(db.Model):
 class Plan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+    source_entry_id = db.Column(db.Integer, nullable=True, index=True)  # Entry.id z timelisty (opcjonalnie)
     title = db.Column(db.String(200), nullable=True)
 
     stored_filename = db.Column(db.String(255), nullable=False)
@@ -332,6 +333,10 @@ def ensure_db_file():
     with app.app_context():
         db.create_all()
         _try_add_column('extra_requests', 'category', 'TEXT')
+        # Powiązanie dodatków z timelistą (żeby nie dublować tych samych pozycji)
+        _try_add_column('extra_request', 'source_entry_id', 'INTEGER')
+        _try_add_column('extra_requests', 'source_entry_id', 'INTEGER')
+
         try:
             db.session.execute(sql_text("SELECT 1"))
         except Exception:
@@ -4311,6 +4316,21 @@ def admin_extras():
 
     rows = q.order_by(ExtraRequest.created_at.desc(), ExtraRequest.id.desc()).limit(300).all()
 
+    # Timelista: pozycje oznaczone jako extra/overtime (do raportowania bez osobnych zgłoszeń)
+    entries_rows = []
+    try:
+        eq = Entry.query.join(User).join(Project)
+        if selected_pid_int:
+            eq = eq.filter(Entry.project_id == selected_pid_int)
+        else:
+            # dla bezpieczeństwa: gdy brak filtra projektu, nie pokazujemy listy do raportu
+            eq = eq.filter(False)
+        eq = eq.filter(or_(Entry.is_extra == True, Entry.is_overtime == True))
+        entries_rows = eq.order_by(Entry.work_date.desc(), Entry.id.desc()).limit(300).all()
+    except Exception:
+        entries_rows = []
+
+
     # kontakty
     contact_email = None
     contact_name = None
@@ -4471,10 +4491,67 @@ Zgłoszenia (zaznacz i utwórz raport)</h6>
 
         <input type="hidden" name="project_id" value="{{ selected_pid }}">
       </form>
+
+      <hr class="my-4">
+      <h6 class="mb-2">Timelista (extra/overtime) – zaznacz i utwórz raport</h6>
+      {% if selected_pid == 'all' %}
+        <div class="alert alert-info mb-2">Wybierz konkretny projekt, aby tworzyć raport z timelisty.</div>
+      {% else %}
+      <form method="post" action="{{ url_for('admin_extra_report_create_from_entries') }}">
+        <div class="row g-2 align-items-end mb-2">
+          <div class="col-md-5">
+            <label class="form-label">E-mail do wysyłki (możesz zmienić)</label>
+            <input class="form-control" name="recipient_email" value="{{ contact_email or '' }}" placeholder="np. pm@firma.no">
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Tekst w raporcie (opcjonalnie)</label>
+            <input class="form-control" name="report_text" placeholder="Krótki opis dodatków / zakresu">
+          </div>
+          <div class="col-md-2">
+            <button class="btn btn-primary w-100">Utwórz raport</button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th style="width:36px;"></th>
+                <th>Data</th>
+                <th>Pracownik</th>
+                <th>Czas</th>
+                <th>Typ</th>
+                <th>Notatka</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in entries_rows %}
+                <tr>
+                  <td><input type="checkbox" name="entry_id" value="{{ e.id }}"></td>
+                  <td>{{ e.work_date.strftime('%Y-%m-%d') }}</td>
+                  <td>{{ e.user.name }}</td>
+                  <td>{{ fmt(e.minutes) }}</td>
+                  <td>
+                    {% if e.is_overtime %}<span class="badge bg-warning text-dark">overtime</span>{% endif %}
+                    {% if e.is_extra %}<span class="badge bg-info text-dark">extra</span>{% endif %}
+                  </td>
+                  <td class="text-muted">{{ e.note or '' }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="6" class="text-muted">Brak wpisów oznaczonych jako extra/overtime.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <input type="hidden" name="project_id" value="{{ selected_pid }}">
+      </form>
+      {% endif %}
+
     </div>
   </div>
 </div>
-""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name, employees=employees, today=today, selected_pid_int=selected_pid_int)
+""", projects=projects, rows=rows, selected_pid=selected_pid, fmt=fmt_hhmm, contact_email=contact_email, contact_name=contact_name, employees=employees, today=today, selected_pid_int=selected_pid_int, entries_rows=entries_rows)
 
     return layout("Dodatki (admin)", body)
 
@@ -4589,6 +4666,114 @@ def admin_extra_report_create():
     flash("Utworzono raport (szkic).", "success")
     return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
+
+
+@app.route("/admin/dodatki/report/create_from_entries", methods=["POST"])
+@login_required
+def admin_extra_report_create_from_entries():
+    require_admin()
+    project_id = request.form.get("project_id")
+    recipient_email = (request.form.get("recipient_email") or "").strip() or None
+    report_text = (request.form.get("report_text") or "").strip() or None
+
+    entry_ids = request.form.getlist("entry_id")
+    if not entry_ids:
+        flash("Zaznacz przynajmniej jedną pozycję z timelisty.", "danger")
+        return redirect(url_for("admin_extras", project_id=project_id or "all"))
+
+    # Ustal projekt (raport zawsze jest per projekt)
+    pid = None
+    if project_id and project_id != "all":
+        try:
+            pid = int(project_id)
+        except Exception:
+            pid = None
+
+    # Wczytaj wpisy timelisty
+    try:
+        ids_int = [int(x) for x in entry_ids]
+    except Exception:
+        ids_int = []
+    entries = Entry.query.filter(Entry.id.in_(ids_int)).all()
+    if not entries:
+        flash("Nie znaleziono wpisów w timeliście.", "danger")
+        return redirect(url_for("admin_extras", project_id=project_id or "all"))
+
+    if pid is None:
+        pid = entries[0].project_id
+
+    # Pilnujemy jednego projektu
+    entries = [e for e in entries if e.project_id == pid]
+    if not entries:
+        flash("Wybrane wpisy nie pasują do projektu.", "warning")
+        return redirect(url_for("admin_extras", project_id=pid))
+
+    # Domyślny kontakt projektu
+    if not recipient_email:
+        recipient_email = _default_project_contact_email(pid)
+
+    # Z Entry robimy ExtraRequest (tylko jeśli jeszcze nie było)
+    reqs = []
+    for e in entries:
+        # Raportujemy tylko wpisy oznaczone jako extra/overtime
+        if not (getattr(e, "is_extra", False) or getattr(e, "is_overtime", False)):
+            continue
+
+        req = ExtraRequest.query.filter_by(source_entry_id=e.id).first()
+        if not req:
+            req = ExtraRequest(
+                user_id=e.user_id,
+                project_id=e.project_id,
+                work_date=e.work_date,
+                minutes=e.minutes,
+                description=(e.note or None),
+                status="NEW",
+                source_entry_id=e.id,
+            )
+            db.session.add(req)
+            db.session.flush()
+
+        if req.status == "CANCELED":
+            continue
+
+        reqs.append(req)
+
+    if not reqs:
+        flash("Brak pozycji do dodania (sprawdź czy wpisy mają zaznaczone extra/overtime).", "warning")
+        return redirect(url_for("admin_extras", project_id=pid))
+
+    db.session.commit()
+
+    # Tworzymy raport
+    rep = ExtraReport(
+        project_id=pid,
+        created_by=current_user.id,
+        recipient_email=recipient_email,
+        report_text=report_text,
+        status="DRAFT",
+    )
+    db.session.add(rep)
+    db.session.commit()
+
+    # Snapshot do raportu + oznaczamy zgłoszenia jako INCLUDED
+    for r in reqs:
+        if r.status == "INCLUDED":
+            continue
+        it = ExtraReportItem(
+            report_id=rep.id,
+            request_id=r.id,
+            user_name=r.user.name,
+            work_date=r.work_date,
+            minutes=r.minutes,
+            description=r.description,
+        )
+        db.session.add(it)
+        r.status = "INCLUDED"
+
+    db.session.commit()
+
+    flash("Utworzono raport (szkic) z timelisty.", "success")
+    return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
 
 @app.route("/admin/dodatki/request/<int:req_id>/delete", methods=["POST"])
