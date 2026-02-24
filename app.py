@@ -18,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v32"
+APP_VERSION = "v33"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -106,7 +106,6 @@ class Project(db.Model):
 class Plan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
-    source_entry_id = db.Column(db.Integer, nullable=True, index=True)  # Entry.id z timelisty (opcjonalnie)
     title = db.Column(db.String(200), nullable=True)
 
     stored_filename = db.Column(db.String(255), nullable=False)
@@ -195,6 +194,7 @@ class ExtraRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, index=True)
+    source_entry_id = db.Column(db.Integer, nullable=True, index=True)  # Entry.id z timelisty (opcjonalnie)
 
     work_date = db.Column(db.Date, nullable=False)
     minutes = db.Column(db.Integer, nullable=False, default=0)
@@ -468,9 +468,9 @@ def _delete_entry_images_files(entry):
 def _try_add_column(table: str, column: str, coltype: str = "TEXT"):
     """Best-effort SQLite schema tweak (no migrations)."""
     try:
-        cols = [r[1] for r in db.session.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+        cols = [r[1] for r in db.session.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()]
         if column not in cols:
-            db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+            db.session.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
             db.session.commit()
     except Exception:
         db.session.rollback()
@@ -555,7 +555,7 @@ BASE = """
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_extras') }}">Dodatki</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Plany</a></li>
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
             
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
 <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
