@@ -5616,114 +5616,253 @@ def admin_extra_report_attachment_delete(report_id, att_id):
     return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
 
+def _extra_report_status_label(status: str, lang: str = "no") -> str:
+    """Czytelne statusy do PDF (NO/PL)."""
+    s = (status or "").upper()
+    if lang == "pl":
+        mapping = {
+            "DRAFT": "Szkic",
+            "SENT": "Wysłano",
+            "APPROVED": "Zatwierdzono",
+            "APPROVED_AUTO": "Zatwierdzono (auto)",
+            "REJECTED": "Odrzucono",
+            "COMMENTED": "Uwagi",
+        }
+        return mapping.get(s, status or "")
+    mapping = {
+        "DRAFT": "Utkast",
+        "SENT": "Sendt",
+        "APPROVED": "Godkjent",
+        "APPROVED_AUTO": "Godkjent (auto)",
+        "REJECTED": "Avvist",
+        "COMMENTED": "Kommentert",
+    }
+    return mapping.get(s, status or "")
+
+
+
+
+# --- PDF: tłumaczenia (NO/PL) ---
+# tr(no, pl) -> zwraca tekst w wybranym języku
+
+def _tr_no(no: str, pl: str) -> str:
+    return no
+
+def _tr_pl(no: str, pl: str) -> str:
+    return pl
+
+def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
+    """Generuje ładny PDF raportu dodatków (Tilleggsrapport) z podpisem."""
+    lang = (lang or "no").strip().lower()
+    if lang not in ("no", "pl"):
+        lang = "no"
+
+    try:
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.lib import colors
+    except Exception:
+        abort(500, "Brak pakietu reportlab (dodaj do requirements).")
+
+    tr = _tr_no if lang == "no" else _tr_pl
+
+    # decyzja + podpis
+    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
+
+    # bezpieczna ścieżka do podpisu (w kodzie są dwie nazwy zmiennych)
+    sig_dir = globals().get("EXTRA_SIGNATURE_DIR") or globals().get("EXTRA_SIG_DIR")
+    sig_path = None
+    if dec and dec.signature_png and sig_dir:
+        p = os.path.join(sig_dir, dec.signature_png)
+        if os.path.exists(p):
+            sig_path = p
+
+    logo_path = os.path.join(BASE_DIR, "static", "ekko_logo.png")
+    if not os.path.exists(logo_path):
+        logo_path = os.path.join(BASE_DIR, "static", "img", "logo.png")
+    logo_ok = os.path.exists(logo_path)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title=f"Tilleggsrapport {rep.id}",
+        author="EKKO NOR AS",
+    )
+
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=14, spaceAfter=6)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=11, spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica", fontSize=9, leading=12)
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica", fontSize=8, leading=10, textColor=colors.grey)
+
+    elements = []
+
+    # nagłówek z logo
+    header_left = []
+    if logo_ok:
+        try:
+            header_left.append(Image(logo_path, width=45 * mm, height=14 * mm))
+        except Exception:
+            header_left.append(Paragraph("EKKO NOR AS", small))
+    else:
+        header_left.append(Paragraph("EKKO NOR AS", small))
+
+    header_right = Paragraph(
+        "<b>EKKO NOR AS</b><br/>Bruseveien 8A<br/>1911 Flateby",
+        small,
+    )
+
+    t = Table([[header_left, header_right]], colWidths=[110 * mm, 60 * mm])
+    t.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
+    elements.append(t)
+    elements.append(Spacer(1, 6))
+
+    # tytuł
+    elements.append(Paragraph(f"{tr('Tilleggsrapport', 'Raport dodatków')} #{rep.id}", h1))
+
+    # meta
+    sent_txt = rep.sent_at.strftime("%Y-%m-%d %H:%M") if getattr(rep, "sent_at", None) else ""
+    decided_txt = rep.decided_at.strftime("%Y-%m-%d %H:%M") if getattr(rep, "decided_at", None) else ""
+    auto_txt = ""
+    if getattr(rep, "sent_at", None):
+        auto_txt = (rep.sent_at + timedelta(days=7)).date().isoformat()
+
+    meta_rows = [
+        [tr("Prosjekt", "Projekt"), (rep.project.name if rep.project else "-")],
+        [tr("Status", "Status"), _extra_report_status_label(getattr(rep, "status", ""), lang=lang)],
+    ]
+    if sent_txt:
+        meta_rows.append([tr("Sendt", "Wysłano"), sent_txt])
+    if auto_txt:
+        meta_rows.append([tr("Auto-godkjenning etter 7 dager", "Auto-akceptacja po 7 dniach"), auto_txt])
+    if decided_txt:
+        meta_rows.append([tr("Beslutning", "Decyzja"), decided_txt])
+
+    meta = Table(meta_rows, colWidths=[60 * mm, 110 * mm])
+    meta.setStyle(
+        TableStyle(
+            [
+                ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.whitesmoke, colors.white]),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    elements.append(meta)
+
+    # opis
+    if getattr(rep, "report_text", None):
+        elements.append(Paragraph(tr("Beskrivelse", "Treść"), h2))
+        safe_txt = (rep.report_text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_txt = safe_txt.replace("\n", "<br/>")
+        elements.append(Paragraph(safe_txt, body))
+
+    # pozycje
+    elements.append(Paragraph(tr("Linjer", "Pozycje"), h2))
+    data = [[tr("Dato", "Data"), tr("Ansatt", "Pracownik"), tr("Timer", "Godziny"), tr("Beskrivelse", "Opis")]]
+    total_min = 0
+    for it in (rep.items or []):
+        total_min += int(getattr(it, "minutes", 0) or 0)
+        data.append([
+            getattr(it, "work_date", None).isoformat() if getattr(it, "work_date", None) else "",
+            (getattr(it, "user_name", "") or ""),
+            fmt_hhmm(int(getattr(it, "minutes", 0) or 0)),
+            (getattr(it, "description", "") or ""),
+        ])
+
+    tbl = Table(data, colWidths=[25 * mm, 45 * mm, 18 * mm, 82 * mm])
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 9),
+                ("FONT", (0, 1), (-1, -1), "Helvetica", 9),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    elements.append(tbl)
+    elements.append(Spacer(1, 6))
+
+    # suma (z uwzględnieniem override, jeśli jest)
+    try:
+        sum_min = int(_extra_report_total_minutes(rep))
+    except Exception:
+        sum_min = total_min
+    elements.append(Paragraph(f"<b>{tr('Totalt', 'Suma')}:</b> {fmt_hhmm(sum_min)}", body))
+
+    # decyzja + podpis
+    if dec and (dec.decided_name or dec.decided_note or sig_path):
+        elements.append(Paragraph(tr("Beslutning", "Decyzja"), h2))
+        name = dec.decided_name or ""
+        dtxt = dec.decided_at.strftime("%Y-%m-%d %H:%M") if getattr(dec, "decided_at", None) else decided_txt
+        elements.append(Paragraph(f"<b>{tr('Signert av', 'Podpis')}:</b> {name or '-'}" + (f" ({dtxt})" if dtxt else ""), body))
+        if dec.decided_note:
+            safe_note = (dec.decided_note or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            safe_note = safe_note.replace("\n", "<br/>")
+            elements.append(Spacer(1, 2))
+            elements.append(Paragraph(safe_note, body))
+        if sig_path:
+            elements.append(Spacer(1, 6))
+            try:
+                elements.append(Image(sig_path, width=80 * mm, height=25 * mm))
+            except Exception:
+                pass
+
+    # stopka
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph("EKKO NOR AS", small))
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
 @app.route("/admin/dodatki/report/<int:report_id>/pdf", methods=["GET"])
 @login_required
 def admin_extra_report_pdf(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
-    audit = ExtraReportAudit.query.filter_by(report_id=rep.id).order_by(ExtraReportAudit.created_at.desc()).limit(100).all()
-    dec = ExtraReportDecision.query.filter_by(report_id=rep.id).first()
-
     if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
         flash("PDF jest dostępny po decyzji (zatwierdzenie/odrzucenie/uwagi).", "warning")
         return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-    except Exception:
-        abort(500, "Brak pakietu reportlab (dodaj do requirements).")
+    # domyślnie raport po norwesku (możesz wymusić ?lang=pl)
+    lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
+    if lang not in ("no", "pl"):
+        lang = "no"
 
-    mem = io.BytesIO()
-    c = canvas.Canvas(mem, pagesize=A4)
-    w, h = A4
-
-    # Logo (duże, lewy górny róg)
-    logo_path = os.path.join(BASE_DIR, "static", "img", "logo.png")
-    logo_w = 140
-    logo_h = 45
-    text_x = 50
-    if os.path.exists(logo_path):
-        try:
-            from reportlab.lib.utils import ImageReader
-            c.drawImage(ImageReader(logo_path), 50, h - 70, width=logo_w, height=logo_h, mask='auto', preserveAspectRatio=True)
-            text_x = 50 + logo_w + 20
-        except Exception:
-            text_x = 50
-
-    y = h - 60
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(text_x, y, f"Raport dodatków #{rep.id}")
-    y -= 22
-    c.setFont("Helvetica", 10)
-    c.drawString(50, y, f"Projekt: {rep.project.name}")
-    y -= 14
-    c.drawString(50, y, f"Status: {rep.status}")
-    y -= 14
-    if rep.sent_at:
-        c.drawString(50, y, f"Wysłano: {rep.sent_at.strftime('%Y-%m-%d %H:%M')}")
-        y -= 14
-        auto_d = (rep.sent_at + timedelta(days=7)).date().isoformat()
-        c.drawString(50, y, f"Auto-akceptacja po 7 dniach: {auto_d}")
-        y -= 14
-    if rep.decided_at:
-        c.drawString(50, y, f"Decyzja: {rep.decided_at.strftime('%Y-%m-%d %H:%M')}")
-        y -= 14
-
-    if rep.report_text:
-        y -= 8
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(50, y, "Treść:")
-        y -= 14
-        c.setFont("Helvetica", 10)
-        for line in rep.report_text.splitlines():
-            if y < 80:
-                c.showPage()
-                y = h - 60
-                c.setFont("Helvetica", 10)
-            c.drawString(50, y, line[:110])
-            y -= 12
-
-    y -= 8
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, y, "Pozycje:")
-    y -= 14
-    c.setFont("Helvetica", 10)
-
-    for it in rep.items:
-        line = f"{it.work_date.isoformat()} | {it.user_name} | {fmt_hhmm(it.minutes)} | {(it.description or '')}"
-        # łamanie proste
-        chunks = [line[i:i+110] for i in range(0, len(line), 110)] or [line]
-        for ch in chunks:
-            if y < 80:
-                c.showPage()
-                y = h - 60
-                c.setFont("Helvetica", 10)
-            c.drawString(50, y, ch)
-            y -= 12
-
-    y -= 10
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(50, y, f"Suma: {fmt_hhmm(_extra_report_total_minutes(rep))}")
-
-    if rep.decided_note:
-        y -= 18
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(50, y, "Uwagi/Decyzja:")
-        y -= 14
-        c.setFont("Helvetica", 10)
-        for line in rep.decided_note.splitlines():
-            if y < 80:
-                c.showPage()
-                y = h - 60
-                c.setFont("Helvetica", 10)
-            c.drawString(50, y, line[:110])
-            y -= 12
-
-    c.showPage()
-    c.save()
-    mem.seek(0)
-    return send_file(mem, as_attachment=True, download_name=f"raport_dodatki_{rep.id}.pdf", mimetype="application/pdf")
+    mem = _extra_report_build_pdf(rep, lang=lang)
+    return send_file(mem, as_attachment=True, download_name=f"tilleggsrapport_{rep.id}.pdf", mimetype="application/pdf")
 
 
 
@@ -5883,93 +6022,18 @@ init_db()
 @app.route("/dodatki/r/<token>/pdf", methods=["GET"])
 def extra_report_public_pdf(token):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
-    # only after client decision (accepted/rejected) or when admin already sent it
-    if rep.status not in ("accepted", "rejected", "sent"):
-        flash("PDF będzie dostępny po akceptacji/odrzuceniu.", "warning")
+    # PDF ma sens dopiero po wysyłce albo po decyzji
+    if rep.status not in ("SENT", "APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
+        flash("PDF będzie dostępny po wysłaniu raportu albo po decyzji (akceptacja/odrzucenie/uwagi).", "warning")
         return redirect(url_for("extra_report_public", token=token))
 
-    lang = (request.args.get("lang") or rep.lang or "no").strip().lower()
+    lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
     if lang not in ("no", "pl"):
         lang = "no"
 
-    # reuse the same PDF generator as admin
-    # we call the admin function body logic by duplicating minimal parts
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import mm
-    from reportlab.lib.utils import ImageReader
-    from reportlab.lib import colors
-    from io import BytesIO
-
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-
-    tr = _tr_no if lang == "no" else _tr_pl
-    fmt = fmt_hhmm
-
-    y = h - 20*mm
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(20*mm, y, tr("Ekstra rapport", "Raport dodatków"))
-    y -= 8*mm
-
-    c.setFont("Helvetica", 10)
-    c.drawString(20*mm, y, f"{tr('Prosjekt', 'Projekt')}: {rep.project.name if rep.project else '-'}")
-    y -= 5*mm
-    c.drawString(20*mm, y, f"{tr('Dato', 'Data')}: {rep.created_at.date().isoformat() if rep.created_at else ''}")
-    y -= 8*mm
-
-    # items
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(20*mm, y, tr("Linjer", "Pozycje"))
-    y -= 6*mm
-
-    c.setFont("Helvetica", 9)
-    items = ExtraReportItem.query.filter_by(report_id=rep.id).order_by(ExtraReportItem.id.asc()).all()
-    total = 0
-    for it in items:
-        if y < 30*mm:
-            c.showPage()
-            y = h - 20*mm
-            c.setFont("Helvetica", 9)
-        line = f"{it.work_date.isoformat() if it.work_date else ''} | {it.user_name or ''} | {it.title or ''} | {fmt(it.minutes or 0)}"
-        c.drawString(20*mm, y, line[:110])
-        y -= 5*mm
-        total += int(it.minutes or 0)
-
-    y -= 4*mm
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(20*mm, y, f"{tr('Sum', 'Suma')}: {fmt(total)}")
-    y -= 10*mm
-
-    # decision + signature
-    decisions = _extra_report_get_decisions(rep.id)
-    if decisions:
-        d = decisions[0]
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(20*mm, y, tr("Signatur", "Podpis"))
-        y -= 6*mm
-        c.setFont("Helvetica", 9)
-        c.drawString(20*mm, y, f"{tr('Navn', 'Imię i nazwisko')}: {d.decided_name or d.user_name or ''}")
-        y -= 5*mm
-        if d.decided_note:
-            c.drawString(20*mm, y, (tr("Kommentar", "Komentarz") + ": " + d.decided_note)[:110])
-            y -= 5*mm
-        if d.signature_png:
-            sig_path = os.path.join(EXTRA_REPORT_SIG_DIR, d.signature_png)
-            if os.path.exists(sig_path):
-                try:
-                    img = ImageReader(sig_path)
-                    c.drawImage(img, 20*mm, y-35*mm, width=80*mm, height=30*mm, preserveAspectRatio=True, mask='auto')
-                    y -= 40*mm
-                except Exception:
-                    pass
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
-    return send_file(buf, mimetype="application/pdf", as_attachment=False,
-                     download_name=f"ekstra_rapport_{rep.id}.pdf")
+    mem = _extra_report_build_pdf(rep, lang=lang)
+    return send_file(mem, mimetype="application/pdf", as_attachment=False,
+                     download_name=f"tilleggsrapport_{rep.id}.pdf")
 
 
 if __name__ == "__main__":
