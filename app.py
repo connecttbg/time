@@ -18,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v33"
+APP_VERSION = "v34"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -694,6 +694,54 @@ def _send_smtp_email(to_email, subject, body):
             pass
 
 
+
+def _send_smtp_email_with_attachment(to_email, subject, body, attachment_bytes: bytes, attachment_filename: str, attachment_mimetype: str = "application/pdf"):
+    """Send email with a single attachment (e.g. PDF). Uses same SMTP env vars as _send_smtp_email."""
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = int((os.getenv("SMTP_PORT", "587") or "587").strip())
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_pass = os.getenv("SMTP_PASSWORD", "").strip()
+
+    if not smtp_host or not smtp_user or not smtp_pass:
+        raise RuntimeError("Brak SMTP_HOST/SMTP_USER/SMTP_PASSWORD w zmiennych środowiskowych.")
+
+    from_email = (os.getenv("SMTP_FROM", smtp_user) or smtp_user).strip()
+    from_name = (os.getenv("SMTP_FROM_NAME", "EKKO NOR AS") or "EKKO NOR AS").strip()
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{from_name} <{from_email}>"
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    try:
+        mt, st = attachment_mimetype.split("/", 1)
+    except Exception:
+        mt, st = "application", "pdf"
+    msg.add_attachment(attachment_bytes, maintype=mt, subtype=st, filename=attachment_filename)
+
+    use_ssl = os.getenv("SMTP_SSL", "").lower() in ("1", "true", "yes") or smtp_port == 465
+    use_starttls = os.getenv("SMTP_STARTTLS", "1").lower() not in ("0", "false", "no")
+
+    if use_ssl:
+        server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+    else:
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+
+    try:
+        if (not use_ssl) and use_starttls:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+
 def _gen_token() -> str:
     return uuid.uuid4().hex + uuid.uuid4().hex
 
@@ -884,8 +932,8 @@ def dashboard():
             now = datetime.now()
             # Traktujemy koniec dnia roboczego jako granicę (23:59:59 danego dnia)
             end_of_work_date = datetime.combine(work_date, datetime.max.time())
-            if end_of_work_date < now - timedelta(hours=48):
-                flash("Godziny zostaly zablokowane poniewaz mozesz dodawac je maksymalnie do 48h skontaktuj sie z Darkiem +4746572904.")
+            if end_of_work_date < now - timedelta(hours=72):
+                flash("Godziny zostaly zablokowane poniewaz mozesz dodawac je maksymalnie do 72h skontaktuj sie z Darkiem +4746572904.")
                 return redirect(url_for("dashboard"))
 
         e = Entry(
@@ -913,7 +961,31 @@ def dashboard():
     projects = Project.query.filter_by(is_active=True).order_by(Project.name).all()
     employees = User.query.order_by(User.name).all()
     today = date.today()
-    m_from, m_to = month_bounds(today)
+    # Użytkownik może podejrzeć wcześniejsze miesiące: ?month=YYYY-MM
+    ym = (request.args.get("month") or "").strip()
+    if ym:
+        try:
+            y, m = [int(x) for x in ym.split("-", 1)]
+            ref = date(y, m, 1)
+        except Exception:
+            ref = today
+            ym = ""
+    else:
+        ref = today
+
+    m_from, m_to = month_bounds(ref)
+
+    # Ostatnie 4 miesiące (do przycisków)
+    month_links = []
+    try:
+        ref2 = m_from
+        for _ in range(4):
+            first = ref2.replace(day=1)
+            month_links.append(first.strftime("%Y-%m"))
+            prev_ref = first - timedelta(days=1)
+            ref2 = prev_ref.replace(day=1)
+    except Exception:
+        month_links = []
     entries = (
         Entry.query.filter(
             Entry.user_id == current_user.id,
@@ -993,6 +1065,17 @@ def dashboard():
     <div class="card p-3">
       <div class="d-flex justify-content-between align-items-center">
         <h5 class="mb-0">Moje wpisy – {{ m_from.isoformat() }} → {{ m_to.isoformat() }}</h5>
+      <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+        <form class="d-flex gap-2 align-items-center" method="get">
+          <input class="form-control form-control-sm" type="month" name="month" value="{{ (m_from.strftime('%Y-%m')) }}">
+          <button class="btn btn-sm btn-outline-primary">Pokaż</button>
+        </form>
+        <div class="ms-auto d-flex flex-wrap gap-1">
+          {% for ml in month_links %}
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('dashboard', month=ml) }}">{{ ml }}</a>
+          {% endfor %}
+        </div>
+      </div>
       </div>
       <div class="table-responsive mt-3">
         <table class="table table-sm align-middle">
@@ -1098,7 +1181,7 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 </div>
-""", projects=projects, entries=entries, fmt=fmt_hhmm, m_from=m_from, m_to=m_to, tot=tot, tot_extra=tot_extra, tot_ot=tot_ot, date=date)
+""", projects=projects, entries=entries, fmt=fmt_hhmm, m_from=m_from, m_to=m_to, tot=tot, tot_extra=tot_extra, tot_ot=tot_ot, date=date, month_links=month_links)
     return layout("Panel", body)
 
 
@@ -1381,8 +1464,25 @@ def edit_entry(entry_id):
     if not (current_user.is_admin or e.user_id == current_user.id):
         abort(403)
 
+
+    # Ograniczenie 72h dla zwykłych użytkowników (nie adminów) – edycja tylko wstecz do 72h
+    if not getattr(current_user, "is_admin", False):
+        now = datetime.now()
+        end_of_work_date = datetime.combine(e.work_date, datetime.max.time())
+        if end_of_work_date < now - timedelta(hours=72):
+            flash("Nie możesz edytować wpisu starszego niż 72h. Skontaktuj się z administracją.", "danger")
+            return redirect(url_for("dashboard"))
+
     if request.method == "POST":
         e.work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
+
+        if not getattr(current_user, "is_admin", False):
+            now = datetime.now()
+            end_of_new_date = datetime.combine(e.work_date, datetime.max.time())
+            if end_of_new_date < now - timedelta(hours=72):
+                flash("Nie możesz ustawić daty starszej niż 72h. Skontaktuj się z administracją.", "danger")
+                return redirect(url_for("dashboard"))
+
         e.project_id = int(request.form.get("project_id"))
         e.minutes = parse_hhmm(request.form.get("hhmm", "0"))
         e.is_extra = bool(request.form.get("is_extra"))
@@ -4851,9 +4951,8 @@ def admin_extra_reports():
               <form method="post" action="{{ url_for('admin_extra_report_delete', report_id=r.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć raport?');">
                 <button class="btn btn-sm btn-outline-danger">Usuń</button>
               </form>
-              {% if r.status in ['APPROVED','APPROVED_AUTO','REJECTED','COMMENTED'] %}
-                <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_extra_report_pdf', report_id=r.id) }}">PDF</a>
-              {% endif %}
+              <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_extra_report_pdf', report_id=r.id) }}">PDF</a>
+
             </td>
           </tr>
         {% else %}
@@ -5212,6 +5311,25 @@ def admin_extra_report_view(report_id):
     return layout("Raport dodatków", body)
 
 
+
+@app.route("/dodatki/r/<token>/pdf", methods=["GET"])
+def extra_report_public_pdf_v1(token):
+    rep = ExtraReport.query.filter_by(token=token).first_or_404()
+    _auto_accept_if_due(rep)
+
+    # PDF dostępny dla klienta po decyzji (podpis/odrzucenie/uwagi/auto)
+    if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
+        flash("PDF będzie dostępny po decyzji klienta.", "warning")
+        return redirect(url_for("extra_report_public", token=token))
+
+    lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
+    if lang not in ("no", "pl"):
+        lang = "no"
+
+    mem = _extra_report_build_pdf(rep, lang=lang)
+    return send_file(mem, as_attachment=True, download_name=f"tilleggsrapport_{rep.id}.pdf", mimetype="application/pdf")
+
+
 @app.route("/dodatki/r/<token>/att/<int:att_id>", methods=["GET"])
 def extra_report_public_attachment(token, att_id):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
@@ -5348,6 +5466,20 @@ def extra_report_public(token):
 
         db.session.commit()
 
+        # Po podpisaniu/odrzuceniu/uwagach – wyślij klientowi PDF (jeśli jest e-mail w raporcie)
+        try:
+            if rep.recipient_email and rep.status in ("APPROVED", "REJECTED", "COMMENTED", "APPROVED_AUTO"):
+                lang_pdf = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
+                if lang_pdf not in ("no", "pl"):
+                    lang_pdf = "no"
+                mem = _extra_report_build_pdf(rep, lang=lang_pdf)
+                pdf_bytes = mem.getvalue() if hasattr(mem, "getvalue") else mem.read()
+                subj = "Tilleggsrapport (PDF) – EKKO NOR AS"
+                body_txt = "Hei!\n\nVedlagt er PDF av tilleggsrapporten.\n\nMvh\nEKKO NOR AS"
+                _send_smtp_email_with_attachment(rep.recipient_email, subj, body_txt, pdf_bytes, f"tilleggsrapport_{rep.id}.pdf", "application/pdf")
+        except Exception:
+            pass
+
         try:
             _extra_audit(rep, rep.status.lower(), actor_type="public", actor_name=sign_name, details=rep.decided_note)
         except Exception:
@@ -5391,6 +5523,10 @@ def extra_report_public(token):
         <div class="small text-muted">
           {{ tr("Prosjekt", "Projekt") }}: <strong>{{ rep.project.name }}</strong><br>
           {{ tr("Status", "Status") }}: <strong>{{ rep.status }}</strong>
+          <div class="mt-2">
+            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('extra_report_public_pdf', token=rep.token, lang=lang) }}">{{ tr("Last ned PDF", "Pobierz PDF") }}</a>
+          </div>
+
           {% if rep.sent_at %}<br>{{ tr("Sendt", "Wysłano") }}: {{ rep.sent_at.strftime("%Y-%m-%d %H:%M") }}{% endif %}
           {% if auto_date %}<br><strong>{{ tr("Merk", "Uwaga") }}:</strong> {{ tr("rapporten blir automatisk godkjent 7 dager etter sending", "raport zostanie automatycznie zatwierdzony po 7 dniach od wysłania") }} ({{ auto_date.isoformat() }}).{% endif %}
         </div>
@@ -5483,7 +5619,6 @@ def extra_report_public(token):
         <div class="col-12 d-flex gap-2">
           <button class="btn btn-success" name="action" value="approve">{{ tr("Godkjenn", "Zatwierdź") }}</button>
           <button class="btn btn-danger" name="action" value="reject">{{ tr("Avvis", "Odrzuć") }}</button>
-          <button class="btn btn-outline-primary" name="action" value="comment">{{ tr("Legg til kommentar", "Dodaj uwagi") }}</button>
         </div>
       </form>
 
@@ -5852,9 +5987,6 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
 def admin_extra_report_pdf(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
-    if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
-        flash("PDF jest dostępny po decyzji (zatwierdzenie/odrzucenie/uwagi).", "warning")
-        return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
     # domyślnie raport po norwesku (możesz wymusić ?lang=pl)
     lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
