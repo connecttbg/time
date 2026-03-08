@@ -11,8 +11,6 @@ import uuid
 from typing import Optional
 from email.message import EmailMessage
 from datetime import datetime, date, timedelta
-import json
-from urllib.request import urlopen, Request
 from flask import Flask, request, redirect, url_for, send_file, abort, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user, UserMixin
@@ -20,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v34"
+APP_VERSION = "v37"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -338,9 +336,6 @@ def ensure_db_file():
         # Powiązanie dodatków z timelistą (żeby nie dublować tych samych pozycji)
         _try_add_column('extra_request', 'source_entry_id', 'INTEGER')
         _try_add_column('extra_requests', 'source_entry_id', 'INTEGER')
-        _try_add_column('extra_report_decisions', 'decision_ip', 'TEXT')
-        _try_add_column('extra_report_decisions', 'decision_city', 'TEXT')
-        _try_add_column('extra_report_decisions', 'decision_country', 'TEXT')
 
         try:
             db.session.execute(sql_text("SELECT 1"))
@@ -718,6 +713,32 @@ def _extra_report_total_minutes(rep: ExtraReport) -> int:
         return 0
 
 
+def _extra_item_images(it):
+    try:
+        req = getattr(it, "request", None)
+        if req and getattr(req, "images", None):
+            imgs = list(req.images or [])
+            if imgs:
+                return imgs
+        if req and getattr(req, "source_entry_id", None):
+            return EntryImage.query.filter_by(entry_id=req.source_entry_id).order_by(EntryImage.id.asc()).all()
+    except Exception:
+        pass
+    return []
+
+
+def _extra_item_image_paths(it):
+    out = []
+    try:
+        for img in (_extra_item_images(it) or []):
+            p = extra_image_view_path(getattr(img, "stored_filename", ""))
+            if p and os.path.exists(p):
+                out.append(p)
+    except Exception:
+        pass
+    return out
+
+
 class ExtraReportAttachment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     report_id = db.Column(db.Integer, db.ForeignKey("extra_report.id"), nullable=False, index=True)
@@ -748,9 +769,6 @@ class ExtraReportDecision(db.Model):
     decided_note = db.Column(db.Text, nullable=True)
     minutes = db.Column("minutes", db.Integer, nullable=False, default=0)
     signature_png = db.Column(db.String(260), nullable=True)  # stored filename under uploads/extra_signatures
-    decision_ip = db.Column(db.String(80), nullable=True)
-    decision_city = db.Column(db.String(120), nullable=True)
-    decision_country = db.Column(db.String(120), nullable=True)
 def _auto_accept_if_due(rep: ExtraReport) -> bool:
     # Auto akceptacja po 7 dniach od wysyłki
     if rep.status == "SENT" and rep.sent_at:
@@ -4859,9 +4877,7 @@ def admin_extra_reports():
               <form method="post" action="{{ url_for('admin_extra_report_delete', report_id=r.id) }}" style="display:inline;" onsubmit="return confirm('Usunąć raport?');">
                 <button class="btn btn-sm btn-outline-danger">Usuń</button>
               </form>
-              {% if r.status in ['APPROVED','APPROVED_AUTO','REJECTED','COMMENTED'] %}
-                <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_extra_report_pdf', report_id=r.id) }}">PDF</a>
-              {% endif %}
+              <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_extra_report_pdf', report_id=r.id) }}">PDF</a>
             </td>
           </tr>
         {% else %}
@@ -5215,7 +5231,7 @@ def admin_extra_report_view(report_id):
     </div>
   </div>
 </div>
-""", rep=rep, audit=audit, decisions=decisions, fmt=fmt_hhmm, total=_extra_report_total_minutes, link=link)
+""", rep=rep, audit=audit, decisions=decisions, fmt=fmt_hhmm, total=_extra_report_total_minutes, link=link, item_images=_extra_item_images)
 
     return layout("Raport dodatków", body)
 
@@ -5233,12 +5249,27 @@ def extra_report_public_image(token, image_id):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
     _auto_accept_if_due(rep)
 
-    img = ExtraRequestImage.query.get_or_404(image_id)
+    img = ExtraRequestImage.query.get(image_id)
+    if img:
+        ok = False
+        try:
+            for it in rep.items or []:
+                if it.request_id == img.request_id:
+                    ok = True
+                    break
+        except Exception:
+            ok = False
+        if ok:
+            path = extra_image_view_path(img.stored_filename)
+            if os.path.exists(path):
+                return send_file(path)
 
+    eimg = EntryImage.query.get_or_404(image_id)
     ok = False
     try:
         for it in rep.items or []:
-            if it.request_id == img.request_id:
+            req = getattr(it, "request", None)
+            if req and getattr(req, "source_entry_id", None) == eimg.entry_id:
                 ok = True
                 break
     except Exception:
@@ -5247,11 +5278,10 @@ def extra_report_public_image(token, image_id):
     if not ok:
         abort(404)
 
-    path = extra_image_view_path(img.stored_filename)
+    path = extra_image_view_path(eimg.stored_filename)
     if not os.path.exists(path):
         abort(404)
     return send_file(path)
-
 
 
 
@@ -5287,46 +5317,6 @@ def extra_signature_public(token):
     return send_file(path)
 
 
-
-
-
-def _client_ip_from_request() -> str:
-    try:
-        forwarded = request.headers.get("X-Forwarded-For", "") or request.headers.get("CF-Connecting-IP", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return (request.headers.get("X-Real-IP") or request.remote_addr or "").strip()
-    except Exception:
-        return ""
-
-
-def _geo_from_ip(ip: str):
-    """Best-effort geolokalizacja IP. Zwraca (city, country)."""
-    ip = (ip or "").strip()
-    if not ip:
-        return "", ""
-    low = ip.lower()
-    if ip.startswith("127.") or ip == "::1" or low == "localhost":
-        return "Lokalnie", "Lokalnie"
-
-    services = [
-        f"http://ip-api.com/json/{ip}?fields=status,message,country,city",
-        f"https://ipwho.is/{ip}",
-    ]
-    for url in services:
-        try:
-            req = Request(url, headers={"User-Agent": "EKKO-NOR-AS/1.0"})
-            with urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            if "ip-api.com" in url:
-                if data.get("status") == "success":
-                    return (data.get("city") or "", data.get("country") or "")
-            else:
-                if data.get("success", True):
-                    return (data.get("city") or "", data.get("country") or "")
-        except Exception:
-            continue
-    return "", ""
 
 @app.route("/dodatki/r/<token>", methods=["GET", "POST"])
 def extra_report_public(token):
@@ -5388,11 +5378,6 @@ def extra_report_public(token):
             dec.user_name = (sign_name or "Klient")
             dec.work_date = date.today()
             dec.minutes = 0
-            ip_addr = _client_ip_from_request()
-            city, country = _geo_from_ip(ip_addr)
-            dec.decision_ip = ip_addr or None
-            dec.decision_city = city or None
-            dec.decision_country = country or None
             fn = _save_signature_png(signature_data) if signature_data else None
             if fn:
                 dec.signature_png = fn
@@ -5481,11 +5466,11 @@ def extra_report_public(token):
               <td>{{ fmt(it.minutes) }}</td>
               <td>{{ it.description or '' }}</td>
               <td>
-                {% if it.request and it.request.images %}
-                  {% for img in it.request.images %}
+                {% set imgs = item_images(it) %}
+                {% if imgs %}
+                  {% for img in imgs %}
                     <a href="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" target="_blank" rel="noopener" style="display:inline-block;margin-right:6px;"><img src="{{ url_for('extra_report_public_image', token=rep.token, image_id=img.id) }}" alt="img" style="width:90px;height:70px;object-fit:cover;border-radius:6px;border:1px solid #ddd;"></a>
                   {% endfor %}
-                  </div>
                 {% else %}-{% endif %}
               </td>
             </tr>
@@ -5509,6 +5494,9 @@ def extra_report_public(token):
     {% endif %}
 
     <div class="mt-3 fw-bold">{{ tr("Sum", "Suma") }}: {{ fmt(total_minutes(rep)) }}</div>
+    <div class="mt-2">
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('extra_report_public_pdf', token=rep.token, lang=lang) }}" target="_blank">{{ tr("Last ned PDF", "Pobierz PDF") }}</a>
+    </div>
 
     {% if rep.status == 'SENT' %}
       <hr class="my-3">
@@ -5536,7 +5524,6 @@ def extra_report_public(token):
         <div class="col-12 d-flex gap-2">
           <button class="btn btn-success" name="action" value="approve">{{ tr("Godkjenn", "Zatwierdź") }}</button>
           <button class="btn btn-danger" name="action" value="reject">{{ tr("Avvis", "Odrzuć") }}</button>
-          <button class="btn btn-outline-primary" name="action" value="comment">{{ tr("Legg til kommentar", "Dodaj uwagi") }}</button>
         </div>
       </form>
 
@@ -5605,7 +5592,7 @@ def extra_report_public(token):
 </div>
 """, rep=rep, decisions=decisions, audit=audit, admin_atts=admin_atts,
        fmt=fmt_hhmm, total_minutes=_extra_report_total_minutes, auto_date=auto_date,
-       lang=lang, tr=tr, base_no=base_no, base_pl=base_pl)
+       lang=lang, tr=tr, base_no=base_no, base_pl=base_pl, item_images=_extra_item_images)
 
     return layout(tr("Tilleggsrapport", "Raport dodatków"), body)
 
@@ -5810,11 +5797,6 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
         meta_rows.append([tr("Auto-godkjenning etter 7 dager", "Auto-akceptacja po 7 dniach"), auto_txt])
     if decided_txt:
         meta_rows.append([tr("Beslutning", "Decyzja"), decided_txt])
-    if dec and getattr(dec, "decision_ip", None):
-        meta_rows.append([tr("IP ved signering", "IP przy podpisie"), dec.decision_ip or ""])
-        place_txt = ", ".join([x for x in [getattr(dec, "decision_city", None) or "", getattr(dec, "decision_country", None) or ""] if x])
-        if place_txt:
-            meta_rows.append([tr("Lokalizacja IP", "Lokalizacja IP"), place_txt])
 
     meta = Table(meta_rows, colWidths=[60 * mm, 110 * mm])
     meta.setStyle(
@@ -5880,6 +5862,29 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
         sum_min = total_min
     elements.append(Paragraph(f"<b>{tr('Totalt', 'Suma')}:</b> {fmt_hhmm(sum_min)}", body))
 
+    for it in (rep.items or []):
+        img_paths = _extra_item_image_paths(it)
+        if not img_paths:
+            continue
+        elements.append(Spacer(1, 6))
+        title_txt = f"{getattr(it, 'work_date', '')} | {(getattr(it, 'user_name', '') or '')} | {fmt_hhmm(int(getattr(it, 'minutes', 0) or 0))}"
+        elements.append(Paragraph(f"<b>{tr('Bilder', 'Zdjęcia')}:</b> {title_txt}", body))
+        row = []
+        for p in img_paths[:4]:
+            try:
+                row.append(Image(p, width=42 * mm, height=30 * mm))
+            except Exception:
+                pass
+        if row:
+            img_tbl = Table([row], colWidths=[45 * mm] * len(row))
+            img_tbl.setStyle(TableStyle([
+                ("LEFTPADDING", (0,0), (-1,-1), 2),
+                ("RIGHTPADDING", (0,0), (-1,-1), 2),
+                ("TOPPADDING", (0,0), (-1,-1), 2),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+            ]))
+            elements.append(img_tbl)
+
     # decyzja + podpis
     if dec and (dec.decided_name or dec.decided_note or sig_path):
         elements.append(Paragraph(tr("Beslutning", "Decyzja"), h2))
@@ -5912,9 +5917,6 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
 def admin_extra_report_pdf(report_id):
     require_admin()
     rep = ExtraReport.query.get_or_404(report_id)
-    if rep.status not in ("APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
-        flash("PDF jest dostępny po decyzji (zatwierdzenie/odrzucenie/uwagi).", "warning")
-        return redirect(url_for("admin_extra_report_view", report_id=rep.id))
 
     # domyślnie raport po norwesku (możesz wymusić ?lang=pl)
     lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
@@ -6082,10 +6084,6 @@ init_db()
 @app.route("/dodatki/r/<token>/pdf", methods=["GET"])
 def extra_report_public_pdf(token):
     rep = ExtraReport.query.filter_by(token=token).first_or_404()
-    # PDF ma sens dopiero po wysyłce albo po decyzji
-    if rep.status not in ("SENT", "APPROVED", "APPROVED_AUTO", "REJECTED", "COMMENTED"):
-        flash("PDF będzie dostępny po wysłaniu raportu albo po decyzji (akceptacja/odrzucenie/uwagi).", "warning")
-        return redirect(url_for("extra_report_public", token=token))
 
     lang = (request.args.get("lang") or getattr(rep, "lang", None) or "no").strip().lower()
     if lang not in ("no", "pl"):
