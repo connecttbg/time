@@ -506,8 +506,8 @@ BASE = """
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root { color-scheme: light; }
-    body{ background:#f5f7fb; color:#1f2937; }
-    .navbar{ background:#ffffff; border-bottom:1px solid #e5e7eb; }
+    body{ background:#a1a5ad; color:#1f2937; }
+    .navbar{ background:#d9d7d7; border-bottom:1px solid #e5e7eb; }
     .card{ background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; }
     .form-control,.form-select,.form-check-input{ background:#ffffff; color:#111827; border:1px solid #d1d5db; }
     .btn-primary{ background:#2563eb; border-color:#2563eb; }
