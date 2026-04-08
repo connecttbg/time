@@ -324,6 +324,16 @@ def require_admin():
     if not current_user.is_authenticated or not current_user.is_admin:
         abort(403)
 
+def is_extra_entry(entry) -> bool:
+    return bool(getattr(entry, 'is_extra', False))
+
+def work_minutes(entries) -> int:
+    """Suma realnie przepracowanych godzin bez pozycji oznaczonych jako extra."""
+    return sum((getattr(e, 'minutes', 0) or 0) for e in entries if not is_extra_entry(e))
+
+def extra_minutes(entries) -> int:
+    return sum((getattr(e, 'minutes', 0) or 0) for e in entries if is_extra_entry(e))
+
 def ensure_db_file():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -949,8 +959,8 @@ def dashboard():
         .order_by(Entry.work_date.desc(), Entry.id.desc())
         .all()
     )
-    tot = sum(e.minutes for e in entries)
-    tot_extra = sum(e.minutes for e in entries if e.is_extra)
+    tot = work_minutes(entries)
+    tot_extra = extra_minutes(entries)
     tot_ot = sum(e.minutes for e in entries if e.is_overtime)
 
     body = render_template_string("""
@@ -1054,7 +1064,7 @@ def dashboard():
         </table>
       </div>
       <div class="mt-2">
-        <span class="me-3">Razem: <strong>{{ fmt(tot) }}</strong></span>
+        <span class="me-3">Godziny pracy: <strong>{{ fmt(tot) }}</strong></span>
         <span class="me-3">Extra: <strong>{{ fmt(tot_extra) }}</strong></span>
         <span class="me-3">Nadgodziny: <strong>{{ fmt(tot_ot) }}</strong></span>
       </div>
@@ -1514,7 +1524,8 @@ def admin_overview():
     prev_to = (prev_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
 
     total = db.session.query(db.func.sum(Entry.minutes)).filter(
-        Entry.work_date >= m_from, Entry.work_date <= m_to
+        Entry.work_date >= m_from, Entry.work_date <= m_to,
+        or_(Entry.is_extra == False, Entry.is_extra.is_(None))
     ).scalar() or 0
 
     users = User.query.filter_by(is_active_u=True).order_by(User.name).all()
@@ -1524,11 +1535,13 @@ def admin_overview():
             Entry.user_id == u.id,
             Entry.work_date >= m_from,
             Entry.work_date <= m_to,
+            or_(Entry.is_extra == False, Entry.is_extra.is_(None)),
         ).scalar() or 0
         prev_min = db.session.query(db.func.sum(Entry.minutes)).filter(
             Entry.user_id == u.id,
             Entry.work_date >= prev_from,
             Entry.work_date <= prev_to,
+            or_(Entry.is_extra == False, Entry.is_extra.is_(None)),
         ).scalar() or 0
         stats.append({"user": u, "curr": curr_min, "prev": prev_min})
 
@@ -1545,7 +1558,7 @@ def admin_overview():
     </div>
   </form>
   <div class="display-6">{{ fmt(total) }}</div>
-  <div class="text-muted">Łącznie zapisanych godzin w wybranym miesiącu</div>
+  <div class="text-muted">Łącznie przepracowanych godzin w wybranym miesiącu (bez pozycji extra)</div>
 </div>
 
 <div class="card p-3">
@@ -1861,8 +1874,8 @@ def admin_entries():
     users = _all_users_ordered()
     projects = Project.query.order_by(Project.name).all()
 
-    tot = sum(e.minutes for e in entries)
-    tot_ex = sum(e.minutes for e in entries if e.is_extra)
+    tot = work_minutes(entries)
+    tot_ex = extra_minutes(entries)
     tot_ot = sum(e.minutes for e in entries if e.is_overtime)
 
     body = render_template_string("""
@@ -1969,7 +1982,7 @@ def admin_entries():
   </div>
 
   <div class="mt-2">
-    <span class="me-3">Razem: <strong>{{ fmt(tot) }}</strong></span>
+    <span class="me-3">Godziny pracy: <strong>{{ fmt(tot) }}</strong></span>
     <span class="me-3">Extra: <strong>{{ fmt(tot_ex) }}</strong></span>
     <span class="me-3">Nadgodziny: <strong>{{ fmt(tot_ot) }}</strong></span>
   </div>
@@ -2517,7 +2530,7 @@ def admin_reports():
         q = q.filter(Entry.project_id == int(project_id))
 
     rows = q.order_by(Entry.work_date.asc(), Entry.id.asc()).all()
-    total_minutes = sum(e.minutes for e in rows)
+    total_minutes = work_minutes(rows)
     users = User.query.order_by(User.name).all()
     projects = Project.query.order_by(Project.name).all()
 
@@ -2600,12 +2613,13 @@ def admin_reports():
     </div>
     <div class="mt-2 fw-bold">
       Suma godzin: {{ fmt(total_minutes) }}
+      <span class="ms-3">Extra: {{ fmt(extra_total_minutes) }}</span>
     </div>
   {% else %}
     <div class="text-muted">Brak wpisów.</div>
   {% endif %}
 </div>
-    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm, total_minutes=total_minutes, d_from=d_from, d_to=d_to)
+    """, rows=rows, users=users, projects=projects, fmt=fmt_hhmm, total_minutes=total_minutes, extra_total_minutes=extra_minutes(rows), d_from=d_from, d_to=d_to)
     return layout("Raport", body)
 
 @app.route("/admin/reports/export", methods=["GET"])
@@ -2653,7 +2667,7 @@ def admin_reports_export():
         ])
 
     # podsumowanie
-    total_min = sum(r.minutes for r in rows)
+    total_min = work_minutes(rows)
     ws.append([])
     ws.append(["Razem", "", "", fmt_hhmm(total_min), "", "", ""])
 
@@ -2718,7 +2732,7 @@ def admin_reports_payroll():
         ws.append(["Data", "Projekt", "Godziny (HH:MM)", "Extra", "Nadgodziny", "Notatka"])
 
         total_minutes = 0
-        extra_minutes = 0
+        extra_minutes_total = 0
         overtime_minutes = 0
 
         for e in entries:
@@ -2730,15 +2744,16 @@ def admin_reports_payroll():
                 "TAK" if e.is_overtime else "",
                 e.note or "",
             ])
-            total_minutes += e.minutes
+            if not e.is_extra:
+                total_minutes += e.minutes
             if e.is_extra:
-                extra_minutes += e.minutes
+                extra_minutes_total += e.minutes
             if e.is_overtime:
                 overtime_minutes += e.minutes
 
         ws.append([])
         ws.append(["Suma godzin", "", fmt_hhmm(total_minutes), "", "", ""])
-        ws.append(["Suma extra", "", fmt_hhmm(extra_minutes), "", "", ""])
+        ws.append(["Suma extra", "", fmt_hhmm(extra_minutes_total), "", "", ""])
         ws.append(["Suma nadgodzin", "", fmt_hhmm(overtime_minutes), "", "", ""])
 
     buf = io.BytesIO()
@@ -2783,8 +2798,10 @@ def user_summary():
         .all()
     )
 
-    cur_total = sum((e.minutes or 0) for e in cur_entries)
-    prev_total = sum((e.minutes or 0) for e in prev_entries)
+    cur_total = work_minutes(cur_entries)
+    prev_total = work_minutes(prev_entries)
+    cur_extra_total = extra_minutes(cur_entries)
+    prev_extra_total = extra_minutes(prev_entries)
 
     cur_label = cur_first.strftime("%Y-%m")
     prev_label = prev_first.strftime("%Y-%m")
@@ -2826,7 +2843,8 @@ def user_summary():
               {% endfor %}
             </tbody>
           </table>
-          <div class="mt-2 fw-bold">Suma: {{ fmt(cur_total) }}</div>
+          <div class="mt-2 fw-bold">Suma godzin pracy: {{ fmt(cur_total) }}</div>
+          <div class="small text-muted">Extra: {{ fmt(cur_extra_total) }}</div>
         </div>
         <div class="col-md-6">
           <h6>Poprzedni miesiąc ({{ prev_label }})</h6>
@@ -2856,7 +2874,8 @@ def user_summary():
               {% endfor %}
             </tbody>
           </table>
-          <div class="mt-2 fw-bold">Suma: {{ fmt(prev_total) }}</div>
+          <div class="mt-2 fw-bold">Suma godzin pracy: {{ fmt(prev_total) }}</div>
+          <div class="small text-muted">Extra: {{ fmt(prev_extra_total) }}</div>
         </div>
       </div>
     </div>
@@ -2864,6 +2883,7 @@ def user_summary():
 </div>
 """, cur_entries=cur_entries, prev_entries=prev_entries, fmt=fmt_hhmm,
        cur_total=cur_total, prev_total=prev_total,
+       cur_extra_total=cur_extra_total, prev_extra_total=prev_extra_total,
        cur_label=cur_label, prev_label=prev_label, date=date)
     return layout("Moje godziny", body)
 
