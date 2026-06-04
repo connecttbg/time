@@ -18,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v37"
+APP_VERSION = "v45-redesign-login-small-logo"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -276,7 +276,7 @@ class ExtraReportItem(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
 
 # --- Helpers ---
@@ -346,6 +346,13 @@ def ensure_db_file():
         # Powiązanie dodatków z timelistą (żeby nie dublować tych samych pozycji)
         _try_add_column('extra_request', 'source_entry_id', 'INTEGER')
         _try_add_column('extra_requests', 'source_entry_id', 'INTEGER')
+
+        # Wypłaty: bezpieczne dodawanie nowych kolumn, gdy baza już istnieje
+        _try_add_column('payroll_setting', 'holiday_pay_percent', "TEXT DEFAULT '10.2'")
+        _try_add_column('payroll_setting', 'aga_percent', "TEXT DEFAULT '14.1'")
+        _try_add_column('payroll_setting', 'otp_percent', "TEXT DEFAULT '2'")
+        _try_add_column('payroll_setting', 'insurance_percent', "TEXT DEFAULT '0'")
+        _try_add_column('payroll_setting', 'insurance_monthly_cost', "TEXT DEFAULT '0'")
 
         try:
             db.session.execute(sql_text("SELECT 1"))
@@ -512,95 +519,286 @@ BASE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title or 'EKKO NOR AS – Rejestrator czasu pracy' }}</title>
+  <title>{{ title or 'EKKO NOR AS' }}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    :root { color-scheme: light; }
-    body{ background:#a1a5ad; color:#1f2937; }
-    .navbar{ background:#d9d7d7; border-bottom:1px solid #e5e7eb; }
-    .card{ background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; }
-    .form-control,.form-select,.form-check-input{ background:#ffffff; color:#111827; border:1px solid #d1d5db; }
-    .btn-primary{ background:#2563eb; border-color:#2563eb; }
-    .btn-outline-primary{ border-color:#2563eb; color:#2563eb; }
-    .btn-outline-primary:hover{ background:#2563eb; color:white; }
-    .table{ color:#111827; }
-    .table thead{ background:#f3f4f6; }
-    .badge-soft{ background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; }
-    .brand-logo{ height:36px; }
-    .brand-big{ max-width:180px; display:block; margin:0 auto 16px; }
-    a{ color:#2563eb; }
-    .container-narrow{ max-width:1100px; }
-  
-    @media (max-width: 576px){
-      /* większe tap-targety i brak iOS zoom w polach */
-      .btn{ min-height:44px; padding-top:.6rem; padding-bottom:.6rem; }
-      .btn-sm{ min-height:44px; padding-top:.55rem; padding-bottom:.55rem; font-size:0.95rem; }
-      .form-control,.form-select{ font-size:16px; min-height:44px; }
-      .navbar .nav-link{ padding:.5rem 0; }
-      .table{ display:block; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; }
+    :root{
+      --bg:#f4f7fb;
+      --surface:#ffffff;
+      --surface-2:#f8fafc;
+      --line:#e5eaf2;
+      --text:#0f172a;
+      --muted:#64748b;
+      --blue:#2563eb;
+      --blue-2:#1d4ed8;
+      --green:#0a7a22;
+      --sidebar:#0f1b2a;
+      --sidebar-2:#162538;
+      --sidebar-line:rgba(255,255,255,.08);
+      --shadow:0 18px 45px rgba(15,23,42,.08);
+      --radius:16px;
+    }
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      font-size:14px;
+    }
+    a{ color:var(--blue); text-decoration:none; }
+    a:hover{ color:var(--blue-2); }
+
+    .app-shell{ min-height:100vh; display:flex; }
+    .app-sidebar{
+      width:252px;
+      min-height:100vh;
+      background:linear-gradient(180deg,var(--sidebar),var(--sidebar-2));
+      color:#fff;
+      position:fixed;
+      inset:0 auto 0 0;
+      z-index:1040;
+      border-right:1px solid var(--sidebar-line);
+      box-shadow:12px 0 30px rgba(15,23,42,.18);
+    }
+    .sidebar-brand{
+      height:74px;
+      display:flex;
+      align-items:center;
+      gap:12px;
+      padding:0 22px;
+      border-bottom:1px solid var(--sidebar-line);
+      font-size:24px;
+      font-weight:800;
+      letter-spacing:.02em;
+    }
+    .sidebar-brand img{ height:34px; max-width:120px; object-fit:contain; }
+    .sidebar-user{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      padding:20px 22px;
+      border-bottom:1px solid var(--sidebar-line);
+    }
+    .avatar{
+      width:48px;height:48px;border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      background:#fff;color:var(--blue);font-weight:800;font-size:20px;
+      box-shadow:0 8px 18px rgba(0,0,0,.18);
+    }
+    .sidebar-user-name{ font-weight:700; line-height:1.2; }
+    .sidebar-role{ display:inline-block;margin-top:4px;padding:3px 8px;border-radius:999px;background:#22c55e;color:#fff;font-size:11px;font-weight:700; }
+    .sidebar-nav{ padding:18px 10px; display:flex; flex-direction:column; gap:6px; }
+    .sidebar-nav a{
+      color:#dce7f7;
+      display:flex;
+      align-items:center;
+      gap:12px;
+      padding:12px 14px;
+      border-radius:10px;
+      font-weight:650;
+      transition:.15s ease;
+    }
+    .sidebar-nav a:hover{ background:rgba(255,255,255,.08); color:#fff; }
+    .sidebar-nav a.active{ background:var(--blue); color:#fff; box-shadow:0 10px 20px rgba(37,99,235,.32); }
+    .nav-ico{ width:22px; text-align:center; opacity:.95; font-size:17px; }
+
+    .app-main{ margin-left:252px; min-height:100vh; width:calc(100% - 252px); }
+    .topbar{
+      height:74px;
+      background:rgba(255,255,255,.92);
+      backdrop-filter:blur(12px);
+      border-bottom:1px solid var(--line);
+      display:flex;align-items:center;justify-content:space-between;
+      padding:0 28px;
+      position:sticky;top:0;z-index:1020;
+    }
+    .topbar-title{ display:flex; align-items:center; gap:12px; font-weight:800; font-size:20px; }
+    .topbar-icon{
+      width:38px;height:38px;border-radius:10px;border:2px solid #111827;
+      display:flex;align-items:center;justify-content:center;font-weight:900;background:#fff;
+    }
+    .topbar-user{ display:flex;align-items:center;gap:12px;color:#111827;font-weight:700; }
+    .topbar-actions{ display:flex;align-items:center;gap:10px; }
+    .menu-toggle{ display:none; border:0; background:#fff; font-size:24px; border-radius:10px; padding:6px 10px; }
+
+    .page-wrap{ max-width:1720px; margin:0 auto; padding:28px; }
+    .footer-note{ color:var(--muted); font-size:12px; text-align:center; padding:8px 0 24px; }
+
+    .card{
+      background:var(--surface);
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+    }
+    .card h5,.card h6{ font-weight:800; color:#0f172a; }
+    .alert{ border-radius:14px; border:1px solid #fde68a; box-shadow:0 10px 24px rgba(245,158,11,.12); }
+
+    .form-label{ color:#334155; font-weight:650; font-size:13px; }
+    .form-control,.form-select{
+      background:#fff;
+      color:#0f172a;
+      border:1px solid #dbe3ee;
+      border-radius:10px;
+      min-height:42px;
+      box-shadow:none;
+    }
+    .form-control:focus,.form-select:focus{
+      border-color:#93b4ff;
+      box-shadow:0 0 0 .22rem rgba(37,99,235,.12);
+    }
+    .btn{ border-radius:10px; font-weight:700; }
+    .btn-primary{ background:var(--blue); border-color:var(--blue); box-shadow:0 10px 18px rgba(37,99,235,.18); }
+    .btn-primary:hover{ background:var(--blue-2); border-color:var(--blue-2); }
+    .btn-outline-primary{ border-color:#b8ccff; color:var(--blue); background:#fff; }
+    .btn-outline-primary:hover{ background:var(--blue); color:white; border-color:var(--blue); }
+    .btn-outline-success{ border-color:#bbf7d0;color:#15803d;background:#fff; }
+    .btn-outline-danger{ border-color:#fecaca;color:#dc2626;background:#fff; }
+
+    .table-responsive{ border-radius:14px; border:1px solid var(--line); background:#fff; }
+    .table{ margin-bottom:0; color:#0f172a; vertical-align:middle; }
+    .table thead th{
+      background:#fff;
+      color:#0f172a;
+      font-weight:800;
+      border-bottom:1px solid var(--line);
+      padding:14px 14px;
+      white-space:nowrap;
+      font-size:13px;
+    }
+    .table tbody td{
+      padding:13px 14px;
+      border-color:#edf1f7;
+    }
+    .table-striped>tbody>tr:nth-of-type(odd)>*{ --bs-table-bg-type:#fbfdff; }
+    .table tbody tr:hover td{ background:#f8fbff; }
+    .table strong{ font-weight:800; }
+    .badge-soft{ background:#eef4ff; border:1px solid #c7d8ff; color:#1d4ed8; }
+    .text-muted{ color:var(--muted)!important; }
+
+    .kpi-card,.card .bg-light.border.rounded{
+      background:#fff!important;
+      border:1px solid var(--line)!important;
+      border-radius:14px!important;
+      padding:16px!important;
+      min-height:92px;
+      box-shadow:0 10px 24px rgba(15,23,42,.045);
+    }
+    .kpi-card strong,.card .bg-light.border.rounded strong{ display:block; color:#1455d9; font-size:19px; margin-top:8px; }
+    .total-green,strong.total-green{ color:var(--green)!important; }
+
+
+    .brand-big{
+      max-width:92px!important;
+      width:92px!important;
+      height:auto!important;
+      display:block;
+      margin:0 auto 14px;
+      object-fit:contain;
+    }
+    .login-card{
+      max-width:420px;
+      margin:0 auto;
+    }
+    .login-logo-wrap{
+      margin-top:8vh;
+      margin-bottom:12px;
     }
 
+    @media (max-width: 992px){
+      .app-shell{ display:block; }
+      .app-sidebar{ position:static; width:100%; min-height:auto; box-shadow:none; }
+      .sidebar-brand{ height:62px; }
+      .sidebar-user{ display:none; }
+      .sidebar-nav{ flex-direction:row; overflow:auto; padding:10px; gap:8px; }
+      .sidebar-nav a{ white-space:nowrap; padding:10px 12px; }
+      .app-main{ margin-left:0; width:100%; }
+      .topbar{ height:62px; padding:0 16px; }
+      .topbar-title{ font-size:17px; }
+      .page-wrap{ padding:16px; }
+    }
+    @media (max-width: 576px){
+      body{ font-size:13px; }
+      .btn{ min-height:42px; }
+      .form-control,.form-select{ font-size:16px; }
+      .table{ white-space:nowrap; }
+      .topbar-user .badge{ display:none; }
+    }
   </style>
 </head>
 <body>
-<nav class="navbar navbar-expand-lg navbar-light mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand d-flex align-items-center" href="{{ url_for('dashboard') if current_user.is_authenticated else url_for('login') }}">
-      <img src="{{ url_for('static', filename='ekko_logo.png') }}" class="brand-logo me-2" alt="logo">
-    </a>
-
-    {% if current_user.is_authenticated %}
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu" aria-controls="navMenu" aria-expanded="false" aria-label="Menu">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-
-      <div class="collapse navbar-collapse" id="navMenu">
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          {% if current_user.is_admin %}
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_overview') }}">Admin</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Pracownicy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_projects') }}">Projekty</a></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_plans') }}">Plany (PDF)</a></li>
-<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_entries') }}">Godziny (admin)</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_reports') }}">Raporty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_extras') }}">Dodatki</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
-            
-<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_costs') }}">Koszty</a></li>
-<li class="nav-item"><a class="nav-link" href="{{ url_for('admin_backup') }}">Backup</a></li>
-          {% else %}
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Godziny</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('extras') }}">Dodatki</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('user_summary') }}">Podsumowanie</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('user_costs') }}">Koszty</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('leaves') }}">Urlopy</a></li>
-            <li class="nav-item"><a class="nav-link" href="{{ url_for('plans') }}">Plany</a></li>
-{% endif %}
-        </ul>
-
-        <div class="d-flex flex-column flex-lg-row gap-2 align-items-start align-items-lg-center">
-          <span class="text-muted small">{{ current_user.name }}</span>
-          <span class="badge bg-secondary">{{ app_version }}</span>
-          <a class="btn btn-sm btn-danger" href="{{ url_for('logout') }}">Wyloguj</a>
-        </div>
+{% if current_user.is_authenticated %}
+<div class="app-shell">
+  <aside class="app-sidebar">
+    <div class="sidebar-brand">
+      <span>EKKO NOR</span>
+    </div>
+    <div class="sidebar-user">
+      <div class="avatar">{{ (current_user.name or 'U')[:1] }}</div>
+      <div>
+        <div class="sidebar-user-name">{{ current_user.name }}</div>
+        <span class="sidebar-role">{% if current_user.is_admin %}Administrator{% else %}Pracownik{% endif %}</span>
       </div>
-    {% endif %}
-  </div>
-</nav>
+    </div>
+    <nav class="sidebar-nav">
+      {% if current_user.is_admin %}
+        <a class="{% if request.endpoint == 'admin_overview' %}active{% endif %}" href="{{ url_for('admin_overview') }}"><span class="nav-ico">⌂</span>Panel główny</a>
+        <a class="{% if request.endpoint in ['admin_projects','admin_project_update','admin_project_toggle','admin_project_delete'] %}active{% endif %}" href="{{ url_for('admin_projects') }}"><span class="nav-ico">▣</span>Projekty</a>
+        <a class="{% if request.endpoint in ['admin_entries','admin_entry_edit'] %}active{% endif %}" href="{{ url_for('admin_entries') }}"><span class="nav-ico">◷</span>Ewidencja godzin</a>
+        <a class="{% if request.endpoint in ['admin_extras','admin_extra_reports','admin_extra_report_view'] %}active{% endif %}" href="{{ url_for('admin_extras') }}"><span class="nav-ico">＋</span>Dodatki</a>
+        <a class="{% if request.endpoint in ['admin_costs','admin_cost_edit'] %}active{% endif %}" href="{{ url_for('admin_costs') }}"><span class="nav-ico">◇</span>Koszty</a>
+        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><span class="nav-ico">□</span>Urlopy</a>
+        <a class="{% if request.endpoint in ['admin_users','admin_user_edit'] %}active{% endif %}" href="{{ url_for('admin_users') }}"><span class="nav-ico">♙</span>Pracownicy</a>
+        <a class="{% if request.endpoint in ['admin_reports','admin_reports_export','admin_reports_payroll'] %}active{% endif %}" href="{{ url_for('admin_reports') }}"><span class="nav-ico">▤</span>Raporty</a>
+        <a class="{% if request.endpoint in ['admin_plans','plans'] %}active{% endif %}" href="{{ url_for('admin_plans') }}"><span class="nav-ico">▧</span>Plany</a>
+        <a class="{% if request.endpoint in ['admin_payroll','admin_payroll_export'] %}active{% endif %}" href="{{ url_for('admin_payroll') }}"><span class="nav-ico">$</span>Wypłaty</a>
+        <a class="{% if request.endpoint == 'admin_backup' %}active{% endif %}" href="{{ url_for('admin_backup') }}"><span class="nav-ico">↧</span>Backup</a>
+      {% else %}
+        <a class="{% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><span class="nav-ico">◷</span>Godziny</a>
+        <a class="{% if request.endpoint == 'extras' %}active{% endif %}" href="{{ url_for('extras') }}"><span class="nav-ico">＋</span>Dodatki</a>
+        <a class="{% if request.endpoint == 'user_summary' %}active{% endif %}" href="{{ url_for('user_summary') }}"><span class="nav-ico">▤</span>Podsumowanie</a>
+        <a class="{% if request.endpoint == 'user_costs' %}active{% endif %}" href="{{ url_for('user_costs') }}"><span class="nav-ico">◇</span>Koszty</a>
+        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><span class="nav-ico">□</span>Urlopy</a>
+        <a class="{% if request.endpoint == 'plans' %}active{% endif %}" href="{{ url_for('plans') }}"><span class="nav-ico">▧</span>Plany</a>
+      {% endif %}
+    </nav>
+  </aside>
 
-<div class="container container-narrow mb-4">
+  <main class="app-main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="topbar-icon">{% if title == 'Wypłaty' %}${% elif 'Koszty' in (title or '') %}◇{% elif 'Urlopy' in (title or '') %}□{% else %}☰{% endif %}</span>
+        <span>{{ title or 'Panel' }}</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="badge bg-light text-dark border">{{ app_version }}</span>
+        <div class="topbar-user">{{ current_user.name }} <span class="text-muted">⌄</span></div>
+        <a class="btn btn-sm btn-outline-danger" href="{{ url_for('logout') }}">Wyloguj</a>
+      </div>
+    </header>
+
+    <div class="page-wrap">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="alert alert-warning">{{ messages[0] }}</div>
+        {% endif %}
+      {% endwith %}
+      {{ body|safe }}
+    </div>
+    <div class="footer-note">Ekko Nor AS · Bruseveien 8A · 1911 Flateby · Admin: dataconnect.no</div>
+  </main>
+</div>
+{% else %}
+<div class="container py-5">
   {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <div class="alert alert-warning">{{ messages[0] }}</div>
-    {% endif %}
+    {% if messages %}<div class="alert alert-warning">{{ messages[0] }}</div>{% endif %}
   {% endwith %}
   {{ body|safe }}
 </div>
+{% endif %}
 
-<div class="text-center mt-4 text-muted" style="font-size:12px; line-height:1.4;">Ekko Nor AS<br>Bruseveien 8A<br>1911 Flateby<br><br>Admin: dataconnect.no</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-
 <script>
 function limitFiles(input, max){
   if (!input || !input.files) return;
@@ -610,11 +808,9 @@ function limitFiles(input, max){
   }
 }
 </script>
-
 </body>
 </html>
 """
-
 def layout(title, body):
     return render_template_string(BASE, title=title, body=body, fmt=fmt_hhmm, app_version=APP_VERSION)
 
@@ -854,13 +1050,11 @@ def login():
 
     body = render_template_string("""
 <div class="row justify-content-center">
-  <div class="col-md-5">
-    <div class="text-center mb-3">
-      <img src="{{ url_for('static', filename='ekko_logo.png') }}" class="brand-big" alt="logo">
-      <h4 class="mb-0">EKKO NOR AS</h4>
-      <div class="text-muted">Rejestrator czasu pracy</div>
+  <div class="col-12 col-sm-10 col-md-6 col-lg-4">
+    <div class="text-center login-logo-wrap">
+      <img src="{{ url_for('static', filename='ekko_logo.png') }}?v={{ app_version }}" class="brand-big" alt="logo" style="max-width:92px;width:92px;height:auto;display:block;margin:0 auto 14px;object-fit:contain;">
     </div>
-    <div class="card p-3">
+    <div class="card p-3 login-card">
       <form method="post" enctype="multipart/form-data">
         <div class="mb-3">
           <label class="form-label">E-mail</label>
@@ -5164,7 +5358,7 @@ def admin_extra_report_view(report_id):
   </div>
 
   <div class="col-12">
-    <div class="card p-3">
+    <div class="card p-3 login-card">
       <form method="post" enctype="multipart/form-data">
         <div class="row g-2">
           <div class="col-md-5">
@@ -6094,6 +6288,564 @@ def _save_signature_png(data_url):
         except Exception:
             pass
 
+
+
+
+# --- Wypłaty (admin only) ---
+class PayrollSetting(db.Model):
+    __tablename__ = "payroll_setting"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), unique=True, nullable=False, index=True)
+
+    # Wypłata brutto
+    hourly_rate = db.Column(db.String(50), nullable=False, default="0")
+    overtime_multiplier = db.Column(db.String(20), nullable=False, default="1.00")
+    extra_multiplier = db.Column(db.String(20), nullable=False, default="1.00")
+
+    # Realne koszty pracodawcy w Norwegii
+    # Domyślnie ustawione pod standardowy koszt: feriepenger 10,2%, sone I.
+    holiday_pay_percent = db.Column(db.String(20), nullable=False, default="10.2")     # feriepenger
+    aga_percent = db.Column(db.String(20), nullable=False, default="14.1")             # arbeidsgiveravgift / NAV
+    otp_percent = db.Column(db.String(20), nullable=False, default="2")                # obligatorisk tjenestepensjon
+    insurance_percent = db.Column(db.String(20), nullable=False, default="0")          # ubezpieczenia liczone procentowo
+    insurance_monthly_cost = db.Column(db.String(50), nullable=False, default="0")     # ubezpieczenia/abonamenty stałe
+
+    fixed_monthly_cost = db.Column(db.String(50), nullable=False, default="0")         # inne koszty stałe miesięczne
+    employer_percent = db.Column(db.String(20), nullable=False, default="0")           # stare pole, zostawione dla zgodności
+    note = db.Column(db.Text, nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref=db.backref("payroll_setting", uselist=False))
+
+
+class PayrollAdjustment(db.Model):
+    __tablename__ = "payroll_adjustment"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    adjustment_date = db.Column(db.Date, nullable=False, index=True)
+    amount = db.Column(db.String(50), nullable=False, default="0")
+    kind = db.Column(db.String(30), nullable=False, default="ADDITION")
+    # ADDITION = dodatek do brutto, od którego liczymy koszty pracodawcy
+    # DEDUCTION = potrącenie z wypłaty, np. zaliczka; nie obniża kosztu pracodawcy za ten miesiąc
+    # EMPLOYER_COST = ręczny koszt firmy, np. badania, kurs, sprzęt, dodatkowe ubezpieczenie
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="payroll_adjustments")
+
+
+def _money(value, default=0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        v = str(value).strip().replace(" ", "").replace("NOK", "").replace("nok", "").replace("kr", "")
+        if not v:
+            return float(default)
+        if "," in v and "." in v:
+            v = v.replace(".", "").replace(",", ".")
+        else:
+            v = v.replace(",", ".")
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _money_fmt(value) -> str:
+    try:
+        return f"{float(value):,.2f}".replace(",", " ").replace(".", ",") + " kr"
+    except Exception:
+        return "0,00 kr"
+
+
+def _percent_fmt(value) -> str:
+    try:
+        return f"{float(value):.2f}".rstrip("0").rstrip(".").replace(".", ",") + "%"
+    except Exception:
+        return "0%"
+
+
+def _payroll_setting_for_user(user_id: int) -> PayrollSetting:
+    st = PayrollSetting.query.filter_by(user_id=user_id).first()
+    if not st:
+        st = PayrollSetting(
+            user_id=user_id,
+            holiday_pay_percent="10.2",
+            aga_percent="14.1",
+            otp_percent="2",
+            insurance_percent="0",
+            insurance_monthly_cost="0",
+        )
+        db.session.add(st)
+        db.session.flush()
+    return st
+
+
+def _payroll_month_data(user, m_from: date, m_to: date):
+    entries = Entry.query.filter(
+        Entry.user_id == user.id,
+        Entry.work_date >= m_from,
+        Entry.work_date <= m_to,
+    ).all()
+    st = _payroll_setting_for_user(user.id)
+
+    regular_min = sum((e.minutes or 0) for e in entries if not e.is_extra and not e.is_overtime)
+    overtime_min = sum((e.minutes or 0) for e in entries if e.is_overtime and not e.is_extra)
+    extra_min = sum((e.minutes or 0) for e in entries if e.is_extra)
+
+    rate = _money(st.hourly_rate)
+    ot_mult = _money(st.overtime_multiplier, 1.0)
+    ex_mult = _money(st.extra_multiplier, 1.0)
+
+    holiday_pct = _money(getattr(st, "holiday_pay_percent", "10.2"), 10.2)
+    aga_pct = _money(getattr(st, "aga_percent", "14.1"), 14.1)
+    otp_pct = _money(getattr(st, "otp_percent", "2"), 2.0)
+    insurance_pct = _money(getattr(st, "insurance_percent", "0"), 0.0)
+    insurance_monthly = _money(getattr(st, "insurance_monthly_cost", "0"), 0.0)
+    fixed_cost = _money(st.fixed_monthly_cost)
+
+    regular_pay = (regular_min / 60.0) * rate
+    overtime_pay = (overtime_min / 60.0) * rate * ot_mult
+    extra_pay = (extra_min / 60.0) * rate * ex_mult
+
+    adjustments = PayrollAdjustment.query.filter(
+        PayrollAdjustment.user_id == user.id,
+        PayrollAdjustment.adjustment_date >= m_from,
+        PayrollAdjustment.adjustment_date <= m_to,
+    ).order_by(PayrollAdjustment.adjustment_date.asc(), PayrollAdjustment.id.asc()).all()
+
+    additions = sum(_money(a.amount) for a in adjustments if a.kind == "ADDITION")
+    deductions = sum(_money(a.amount) for a in adjustments if a.kind == "DEDUCTION")
+    employer_other = sum(_money(a.amount) for a in adjustments if a.kind == "EMPLOYER_COST")
+
+    gross_salary = regular_pay + overtime_pay + extra_pay + additions
+    payout_now = gross_salary - deductions
+
+    # Realny koszt pracodawcy. Feriepenger są kosztem firmy, nawet jeśli wypłacane później.
+    holiday_pay = max(gross_salary, 0) * holiday_pct / 100.0
+    aga_on_salary_and_holiday = max(gross_salary + holiday_pay, 0) * aga_pct / 100.0
+    otp = max(gross_salary, 0) * otp_pct / 100.0
+    aga_on_otp = max(otp, 0) * aga_pct / 100.0
+    insurance_percent_cost = max(gross_salary, 0) * insurance_pct / 100.0
+
+    statutory_costs = holiday_pay + aga_on_salary_and_holiday + otp + aga_on_otp + insurance_percent_cost
+    company_total = gross_salary + statutory_costs + insurance_monthly + fixed_cost + employer_other
+
+    effective_extra_pct = (statutory_costs / gross_salary * 100.0) if gross_salary > 0 else 0.0
+    effective_total_pct = ((company_total / gross_salary - 1.0) * 100.0) if gross_salary > 0 else 0.0
+
+    return {
+        "user": user,
+        "setting": st,
+        "entries": entries,
+        "adjustments": adjustments,
+        "regular_min": regular_min,
+        "overtime_min": overtime_min,
+        "extra_min": extra_min,
+        "rate": rate,
+        "regular_pay": regular_pay,
+        "overtime_pay": overtime_pay,
+        "extra_pay": extra_pay,
+        "additions": additions,
+        "deductions": deductions,
+        "gross_salary": gross_salary,
+        "payout_now": payout_now,
+        "holiday_pay": holiday_pay,
+        "aga_on_salary_and_holiday": aga_on_salary_and_holiday,
+        "otp": otp,
+        "aga_on_otp": aga_on_otp,
+        "insurance_percent_cost": insurance_percent_cost,
+        "insurance_monthly": insurance_monthly,
+        "fixed_cost": fixed_cost,
+        "employer_other": employer_other,
+        "statutory_costs": statutory_costs,
+        "company_total": company_total,
+        "effective_extra_pct": effective_extra_pct,
+        "effective_total_pct": effective_total_pct,
+        # aliasy dla zgodności z ewentualnym starym eksportem/szablonem
+        "wage_total": payout_now,
+        "employer_fee": statutory_costs,
+    }
+
+
+@app.route("/admin/payroll", methods=["GET", "POST"])
+@login_required
+def admin_payroll():
+    require_admin()
+
+    ym = request.args.get("month") or date.today().strftime("%Y-%m")
+    try:
+        year, month = map(int, ym.split("-"))
+        m_from = date(year, month, 1)
+    except Exception:
+        m_from = date.today().replace(day=1)
+        ym = m_from.strftime("%Y-%m")
+    m_to = (m_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    selected_uid = request.args.get("user_id", "all")
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "save_settings":
+            for u in User.query.order_by(User.name.asc()).all():
+                st = _payroll_setting_for_user(u.id)
+                prefix = f"u{u.id}_"
+                st.hourly_rate = (request.form.get(prefix + "hourly_rate") or "0").strip() or "0"
+                st.overtime_multiplier = (request.form.get(prefix + "overtime_multiplier") or "1.00").strip() or "1.00"
+                st.extra_multiplier = (request.form.get(prefix + "extra_multiplier") or "1.00").strip() or "1.00"
+                st.holiday_pay_percent = (request.form.get(prefix + "holiday_pay_percent") or "10.2").strip() or "10.2"
+                st.aga_percent = (request.form.get(prefix + "aga_percent") or "14.1").strip() or "14.1"
+                st.otp_percent = (request.form.get(prefix + "otp_percent") or "2").strip() or "2"
+                st.insurance_percent = (request.form.get(prefix + "insurance_percent") or "0").strip() or "0"
+                st.insurance_monthly_cost = (request.form.get(prefix + "insurance_monthly_cost") or "0").strip() or "0"
+                st.fixed_monthly_cost = (request.form.get(prefix + "fixed_monthly_cost") or "0").strip() or "0"
+                st.note = (request.form.get(prefix + "note") or "").strip() or None
+                st.updated_at = datetime.utcnow()
+            db.session.commit()
+            flash("Zapisano ustawienia wypłat.", "success")
+            return redirect(url_for("admin_payroll", month=ym, user_id=selected_uid))
+
+        if action == "add_adjustment":
+            try:
+                uid = int(request.form.get("user_id") or "0")
+                adj_date = datetime.strptime(request.form.get("adjustment_date"), "%Y-%m-%d").date()
+            except Exception:
+                flash("Nieprawidłowe dane pozycji.", "warning")
+                return redirect(url_for("admin_payroll", month=ym, user_id=selected_uid))
+            amount = (request.form.get("amount") or "0").strip() or "0"
+            kind = (request.form.get("kind") or "ADDITION").strip()
+            if kind not in ("ADDITION", "DEDUCTION", "EMPLOYER_COST"):
+                kind = "ADDITION"
+            desc = (request.form.get("description") or "").strip() or None
+            db.session.add(PayrollAdjustment(user_id=uid, adjustment_date=adj_date, amount=amount, kind=kind, description=desc))
+            db.session.commit()
+            flash("Dodano pozycję do wypłaty.", "success")
+            return redirect(url_for("admin_payroll", month=ym, user_id=selected_uid))
+
+    users = User.query.order_by(User.name.asc()).all()
+    visible_users = users if selected_uid == "all" else [u for u in users if str(u.id) == str(selected_uid)]
+    rows = [_payroll_month_data(u, m_from, m_to) for u in visible_users]
+
+    total_gross = sum(r["gross_salary"] for r in rows)
+    total_payout = sum(r["payout_now"] for r in rows)
+    total_holiday = sum(r["holiday_pay"] for r in rows)
+    total_aga = sum(r["aga_on_salary_and_holiday"] + r["aga_on_otp"] for r in rows)
+    total_otp = sum(r["otp"] for r in rows)
+    total_insurance = sum(r["insurance_percent_cost"] + r["insurance_monthly"] for r in rows)
+    total_other = sum(r["fixed_cost"] + r["employer_other"] for r in rows)
+    total_company = sum(r["company_total"] for r in rows)
+    total_employer_costs = total_company - total_gross
+
+    body = render_template_string("""
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <h5 class="mb-1">Wypłaty</h5>
+          <div class="small text-muted">Widoczne tylko dla adminów. Moduł pokazuje realny koszt pracodawcy: brutto + feriepenger + arbeidsgiveravgift + OTP + ubezpieczenia + koszty ręczne.</div>
+        </div>
+        <a class="btn btn-sm btn-outline-success" href="{{ url_for('admin_payroll_export') }}?month={{ ym }}&user_id={{ selected_uid }}">Eksport Excel</a>
+      </div>
+
+      <form class="row g-2 align-items-end mt-3" method="get">
+        <div class="col-md-3">
+          <label class="form-label">Miesiąc</label>
+          <input class="form-control" type="month" name="month" value="{{ ym }}">
+        </div>
+        <div class="col-md-5">
+          <label class="form-label">Pracownik</label>
+          <select class="form-select" name="user_id">
+            <option value="all" {% if selected_uid == 'all' %}selected{% endif %}>Wszyscy</option>
+            {% for u in users %}
+              <option value="{{ u.id }}" {% if selected_uid|int == u.id %}selected{% endif %}>{{ u.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2"><button class="btn btn-outline-primary w-100">Pokaż</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6>Podsumowanie okresu {{ m_from.isoformat() }} → {{ m_to.isoformat() }}</h6>
+      <div class="row g-2 mt-1">
+        <div class="col-md-3"><div class="border rounded p-2 bg-light">Brutto naliczone: <strong>{{ money(total_gross) }}</strong></div></div>
+        <div class="col-md-3"><div class="border rounded p-2 bg-light">Do wypłaty po potrąceniach: <strong>{{ money(total_payout) }}</strong></div></div>
+        <div class="col-md-3"><div class="border rounded p-2 bg-light">Koszty pracodawcy ponad brutto: <strong>{{ money(total_employer_costs) }}</strong></div></div>
+        <div class="col-md-3"><div class="border rounded p-2 bg-light">Łączny koszt firmy: <strong>{{ money(total_company) }}</strong></div></div>
+      </div>
+      <div class="row g-2 mt-2 small">
+        <div class="col-md-3">Feriepenger: <strong>{{ money(total_holiday) }}</strong></div>
+        <div class="col-md-3">Arbeidsgiveravgift/NAV: <strong>{{ money(total_aga) }}</strong></div>
+        <div class="col-md-2">OTP: <strong>{{ money(total_otp) }}</strong></div>
+        <div class="col-md-2">Ubezpieczenia: <strong>{{ money(total_insurance) }}</strong></div>
+        <div class="col-md-2">Inne: <strong>{{ money(total_other) }}</strong></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6 class="mb-2">Ustawienia stawek i obowiązkowych kosztów</h6>
+      <form method="post">
+        <input type="hidden" name="action" value="save_settings">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Pracownik</th><th>Stawka/h</th><th>OT x</th><th>Extra x</th><th>Feriepenger %</th><th>AGA/NAV %</th><th>OTP %</th><th>Ubezp. %</th><th>Ubezp. mies.</th><th>Inne stałe/mies.</th><th>Notatka</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for u in users %}
+                {% set st = setting(u.id) %}
+                <tr>
+                  <td>{{ u.name }}</td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_hourly_rate" value="{{ st.hourly_rate }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_overtime_multiplier" value="{{ st.overtime_multiplier }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_extra_multiplier" value="{{ st.extra_multiplier }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_holiday_pay_percent" value="{{ st.holiday_pay_percent or '10.2' }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_aga_percent" value="{{ st.aga_percent or '14.1' }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_otp_percent" value="{{ st.otp_percent or '2' }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_insurance_percent" value="{{ st.insurance_percent or '0' }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_insurance_monthly_cost" value="{{ st.insurance_monthly_cost or '0' }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_fixed_monthly_cost" value="{{ st.fixed_monthly_cost }}"></td>
+                  <td><input class="form-control form-control-sm" name="u{{u.id}}_note" value="{{ st.note or '' }}"></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <button class="btn btn-primary">Zapisz ustawienia</button>
+      </form>
+      <div class="small text-muted mt-2">
+        Domyślne wartości: feriepenger 10,2%, AGA/NAV 14,1%, OTP 2%. Zmień je, jeśli firma ma inną strefę arbeidsgiveravgift, inną umowę urlopową albo wyższą emeryturę.
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6 class="mb-2">Dodaj ręczną pozycję</h6>
+      <form class="row g-2 align-items-end" method="post">
+        <input type="hidden" name="action" value="add_adjustment">
+        <div class="col-md-3">
+          <label class="form-label">Pracownik</label>
+          <select class="form-select" name="user_id" required>
+            {% for u in users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Data</label>
+          <input class="form-control" type="date" name="adjustment_date" value="{{ m_to.isoformat() }}" required>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Typ</label>
+          <select class="form-select" name="kind">
+            <option value="ADDITION">Dodatek brutto</option>
+            <option value="DEDUCTION">Potrącenie z wypłaty</option>
+            <option value="EMPLOYER_COST">Koszt firmy</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Kwota</label>
+          <input class="form-control" name="amount" placeholder="np. 500" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Opis</label>
+          <input class="form-control" name="description" placeholder="np. bonus, zaliczka, kurs, badania">
+        </div>
+        <div class="col-12"><button class="btn btn-outline-primary">Dodaj pozycję</button></div>
+      </form>
+      <div class="small text-muted mt-2">Dodatek brutto zwiększa podstawę kosztów. Potrącenie zmniejsza tylko kwotę do wypłaty. Koszt firmy dodaje się tylko do kosztu pracodawcy.</div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-3">
+      <h6 class="mb-2">Rozliczenie pracowników – realny koszt firmy</h6>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped align-middle">
+          <thead>
+            <tr>
+              <th>Pracownik</th>
+              <th>Godziny / brutto</th>
+              <th>Feriepenger<br><span class="small text-muted">10,2% domyślnie</span></th>
+              <th>Arbeidsgiveravgift / NAV<br><span class="small text-muted">14,1% domyślnie</span></th>
+              <th>OTP<br><span class="small text-muted">2% domyślnie</span></th>
+              <th>AGA od OTP</th>
+              <th>Ubezpieczenie</th>
+              <th>Koszt firmy razem</th>
+              <th>100 kr brutto kosztuje</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+              <tr>
+                <td><strong>{{ r.user.name }}</strong><br><span class="small text-muted">stawka {{ money(r.rate) }}/h</span></td>
+                <td>
+                  <strong>{{ money(r.gross_salary) }}</strong><br>
+                  <span class="small text-muted">{{ fmt(r.regular_min + r.overtime_min + r.extra_min) }} godzin łącznie</span>
+                  {% if r.payout_now != r.gross_salary %}<br><span class="small text-muted">do wypłaty po potrąceniach: {{ money(r.payout_now) }}</span>{% endif %}
+                </td>
+                <td>{{ money(r.holiday_pay) }}</td>
+                <td>{{ money(r.aga_on_salary_and_holiday) }}</td>
+                <td>{{ money(r.otp) }}</td>
+                <td>{{ money(r.aga_on_otp) }}</td>
+                <td>
+                  {{ money(r.insurance_percent_cost + r.insurance_monthly) }}
+                  <br><span class="small text-muted">%: {{ money(r.insurance_percent_cost) }} / mies.: {{ money(r.insurance_monthly) }}</span>
+                </td>
+                <td><strong>{{ money(r.company_total) }}</strong><br><span class="small text-muted">koszt ponad brutto: {{ money(r.company_total - r.gross_salary) }}</span></td>
+                <td>{% if r.gross_salary > 0 %}<strong>{{ money(r.company_total / r.gross_salary * 100) }}</strong><br><span class="small text-muted">+{{ percent(r.effective_total_pct) }}</span>{% else %}-{% endif %}</td>
+              </tr>
+              {% if r.additions or r.deductions or r.fixed_cost or r.employer_other or r.adjustments %}
+                <tr>
+                  <td colspan="9" class="bg-white small text-muted">
+                    {% if r.additions %}Dodatki brutto: {{ money(r.additions) }}. {% endif %}
+                    {% if r.deductions %}Potrącenia, tylko do wypłaty: {{ money(r.deductions) }}. {% endif %}
+                    {% if r.fixed_cost or r.employer_other %}Dodatkowe koszty firmy: {{ money(r.fixed_cost + r.employer_other) }}. {% endif %}
+                    {% if r.adjustments %}
+                      <div class="mt-1">Pozycje ręczne:
+                        {% for a in r.adjustments %}
+                          <form class="d-inline-block me-2 mb-1" method="post" action="{{ url_for('admin_payroll_adjustment_delete', adj_id=a.id) }}" onsubmit="return confirm('Usunąć tę pozycję?')">
+                            <span class="badge bg-light text-dark border">{{ a.adjustment_date.isoformat() }} | {{ a.kind }} | {{ a.amount }} kr | {{ a.description or '' }}</span>
+                            <button class="btn btn-sm btn-outline-danger py-0">usuń</button>
+                          </form>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endif %}
+            {% else %}
+              <tr><td colspan="9" class="text-muted">Brak pracowników.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+""", users=users, rows=rows, ym=ym, selected_uid=selected_uid, m_from=m_from, m_to=m_to,
+       fmt=fmt_hhmm, money=_money_fmt, percent=_percent_fmt, setting=_payroll_setting_for_user,
+       total_gross=total_gross, total_payout=total_payout, total_holiday=total_holiday,
+       total_aga=total_aga, total_otp=total_otp, total_insurance=total_insurance,
+       total_other=total_other, total_company=total_company, total_employer_costs=total_employer_costs)
+    return layout("Wypłaty", body)
+
+
+@app.route("/admin/payroll/adjustment/<int:adj_id>/delete", methods=["POST"])
+@login_required
+def admin_payroll_adjustment_delete(adj_id):
+    require_admin()
+    adj = PayrollAdjustment.query.get_or_404(adj_id)
+    ym = adj.adjustment_date.strftime("%Y-%m") if adj.adjustment_date else date.today().strftime("%Y-%m")
+    db.session.delete(adj)
+    db.session.commit()
+    flash("Usunięto pozycję z wypłaty.", "success")
+    return redirect(url_for("admin_payroll", month=ym, user_id="all"))
+
+
+@app.route("/admin/payroll/export.xlsx", methods=["GET"])
+@login_required
+def admin_payroll_export():
+    require_admin()
+    try:
+        from openpyxl import Workbook
+    except Exception:
+        abort(500, "Brak pakietu openpyxl")
+
+    ym = request.args.get("month") or date.today().strftime("%Y-%m")
+    selected_uid = request.args.get("user_id", "all")
+    year, month = map(int, ym.split("-"))
+    m_from = date(year, month, 1)
+    m_to = (m_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    users = User.query.order_by(User.name.asc()).all()
+    if selected_uid != "all":
+        users = [u for u in users if str(u.id) == str(selected_uid)]
+    rows = [_payroll_month_data(u, m_from, m_to) for u in users]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Wyplaty"
+    ws.append(["Okres", f"{m_from.isoformat()} - {m_to.isoformat()}"])
+    ws.append([])
+    ws.append([
+        "Pracownik", "Normalne", "Nadgodziny", "Extra", "Stawka/h",
+        "Brutto z godzin", "Dodatki brutto", "Potrącenia", "Brutto naliczone", "Do wypłaty",
+        "Feriepenger", "AGA od brutto+ferie", "OTP", "AGA od OTP", "Ubezpieczenie %",
+        "Ubezpieczenie miesięczne", "Inne stałe", "Ręczne koszty firmy", "Łączny koszt firmy", "% ponad brutto"
+    ])
+    for r in rows:
+        ws.append([
+            r["user"].name,
+            fmt_hhmm(r["regular_min"]),
+            fmt_hhmm(r["overtime_min"]),
+            fmt_hhmm(r["extra_min"]),
+            r["rate"],
+            r["regular_pay"] + r["overtime_pay"] + r["extra_pay"],
+            r["additions"],
+            r["deductions"],
+            r["gross_salary"],
+            r["payout_now"],
+            r["holiday_pay"],
+            r["aga_on_salary_and_holiday"],
+            r["otp"],
+            r["aga_on_otp"],
+            r["insurance_percent_cost"],
+            r["insurance_monthly"],
+            r["fixed_cost"],
+            r["employer_other"],
+            r["company_total"],
+            r["effective_total_pct"],
+        ])
+    ws.append([])
+    ws.append([
+        "RAZEM", "", "", "", "",
+        sum(r["regular_pay"] + r["overtime_pay"] + r["extra_pay"] for r in rows),
+        sum(r["additions"] for r in rows),
+        sum(r["deductions"] for r in rows),
+        sum(r["gross_salary"] for r in rows),
+        sum(r["payout_now"] for r in rows),
+        sum(r["holiday_pay"] for r in rows),
+        sum(r["aga_on_salary_and_holiday"] for r in rows),
+        sum(r["otp"] for r in rows),
+        sum(r["aga_on_otp"] for r in rows),
+        sum(r["insurance_percent_cost"] for r in rows),
+        sum(r["insurance_monthly"] for r in rows),
+        sum(r["fixed_cost"] for r in rows),
+        sum(r["employer_other"] for r in rows),
+        sum(r["company_total"] for r in rows),
+        "",
+    ])
+
+    try:
+        from openpyxl.styles import Font
+        from openpyxl.utils import get_column_letter
+        for cell in ws[3]:
+            cell.font = Font(bold=True)
+        for row in ws.iter_rows(min_row=4, min_col=5, max_col=19):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.00'
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+        for col_idx in range(1, ws.max_column + 1):
+            max_len = 0
+            for cell in ws[get_column_letter(col_idx)]:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(10, max_len + 2), 28)
+    except Exception:
+        pass
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=f"wyplaty_{ym}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # --- Init DB after all models/routes are defined ---
