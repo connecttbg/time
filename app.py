@@ -18,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v45-redesign-login-small-logo"
+APP_VERSION = "v46-mobile-polish"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -518,37 +518,43 @@ BASE = """
 <html lang="pl">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#102033">
   <title>{{ title or 'EKKO NOR AS' }}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     :root{
-      --bg:#f4f7fb;
+      --bg:#f5f7fa;
       --surface:#ffffff;
       --surface-2:#f8fafc;
-      --line:#e5eaf2;
-      --text:#0f172a;
+      --line:#e2e8f0;
+      --text:#132238;
       --muted:#64748b;
-      --blue:#2563eb;
-      --blue-2:#1d4ed8;
+      --blue:#1f5fae;
+      --blue-2:#184b8b;
       --green:#0a7a22;
-      --sidebar:#0f1b2a;
-      --sidebar-2:#162538;
+      --sidebar:#102033;
+      --sidebar-2:#142a43;
       --sidebar-line:rgba(255,255,255,.08);
-      --shadow:0 18px 45px rgba(15,23,42,.08);
-      --radius:16px;
+      --shadow:0 8px 28px rgba(15,23,42,.07);
+      --radius:14px;
     }
     *{ box-sizing:border-box; }
-    html,body{ height:100%; }
+    html,body{ min-height:100%; }
+    html{ -webkit-text-size-adjust:100%; }
     body{
       margin:0;
       background:var(--bg);
       color:var(--text);
       font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
       font-size:14px;
+      line-height:1.5;
+      overflow-x:hidden;
     }
     a{ color:var(--blue); text-decoration:none; }
     a:hover{ color:var(--blue-2); }
+    :focus-visible{ outline:3px solid rgba(31,95,174,.3); outline-offset:2px; }
 
     .app-shell{ min-height:100vh; display:flex; }
     .app-sidebar{
@@ -561,48 +567,63 @@ BASE = """
       z-index:1040;
       border-right:1px solid var(--sidebar-line);
       box-shadow:12px 0 30px rgba(15,23,42,.18);
+      display:flex;
+      flex-direction:column;
+      overflow:hidden;
     }
     .sidebar-brand{
       height:74px;
       display:flex;
       align-items:center;
+      justify-content:space-between;
       gap:12px;
       padding:0 22px;
       border-bottom:1px solid var(--sidebar-line);
-      font-size:24px;
+      font-size:21px;
       font-weight:800;
-      letter-spacing:.02em;
+      letter-spacing:.055em;
+      flex:0 0 auto;
     }
     .sidebar-brand img{ height:34px; max-width:120px; object-fit:contain; }
+    .sidebar-close{
+      display:none;
+      width:42px;height:42px;border:0;border-radius:11px;
+      align-items:center;justify-content:center;
+      color:#fff;background:rgba(255,255,255,.09);font-size:21px;
+    }
     .sidebar-user{
       display:flex;
       align-items:center;
       gap:12px;
-      padding:20px 22px;
+      padding:18px 20px;
       border-bottom:1px solid var(--sidebar-line);
+      flex:0 0 auto;
     }
     .avatar{
-      width:48px;height:48px;border-radius:50%;
+      width:44px;height:44px;border-radius:13px;
       display:flex;align-items:center;justify-content:center;
-      background:#fff;color:var(--blue);font-weight:800;font-size:20px;
-      box-shadow:0 8px 18px rgba(0,0,0,.18);
+      background:#fff;color:var(--blue);font-weight:800;font-size:18px;
+      box-shadow:0 6px 16px rgba(0,0,0,.15);
     }
     .sidebar-user-name{ font-weight:700; line-height:1.2; }
-    .sidebar-role{ display:inline-block;margin-top:4px;padding:3px 8px;border-radius:999px;background:#22c55e;color:#fff;font-size:11px;font-weight:700; }
-    .sidebar-nav{ padding:18px 10px; display:flex; flex-direction:column; gap:6px; }
+    .sidebar-role{ display:inline-block;margin-top:5px;padding:2px 8px;border-radius:999px;background:rgba(74,222,128,.15);border:1px solid rgba(134,239,172,.22);color:#bbf7d0;font-size:11px;font-weight:700; }
+    .sidebar-nav{ padding:14px 10px; display:flex; flex-direction:column; gap:4px; overflow-y:auto; flex:1 1 auto; scrollbar-width:thin; }
     .sidebar-nav a{
       color:#dce7f7;
       display:flex;
       align-items:center;
       gap:12px;
-      padding:12px 14px;
-      border-radius:10px;
+      min-height:46px;
+      padding:11px 13px;
+      border-radius:11px;
       font-weight:650;
-      transition:.15s ease;
+      transition:background-color .15s ease,color .15s ease,transform .15s ease;
     }
-    .sidebar-nav a:hover{ background:rgba(255,255,255,.08); color:#fff; }
-    .sidebar-nav a.active{ background:var(--blue); color:#fff; box-shadow:0 10px 20px rgba(37,99,235,.32); }
-    .nav-ico{ width:22px; text-align:center; opacity:.95; font-size:17px; }
+    .sidebar-nav a:hover{ background:rgba(255,255,255,.08); color:#fff; transform:translateX(2px); }
+    .sidebar-nav a.active{ background:#1f5fae; color:#fff; box-shadow:0 8px 18px rgba(3,12,24,.22); }
+    .nav-ico{ width:22px; text-align:center; opacity:.96; font-size:18px; line-height:1; }
+    .sidebar-mobile-footer{ display:none; padding:10px; border-top:1px solid var(--sidebar-line); }
+    .sidebar-backdrop{ display:none; }
 
     .app-main{ margin-left:252px; min-height:100vh; width:calc(100% - 252px); }
     .topbar{
@@ -614,17 +635,18 @@ BASE = """
       padding:0 28px;
       position:sticky;top:0;z-index:1020;
     }
-    .topbar-title{ display:flex; align-items:center; gap:12px; font-weight:800; font-size:20px; }
+    .topbar-title{ display:flex; align-items:center; gap:12px; min-width:0; font-weight:800; font-size:19px; }
+    .topbar-title>span:last-child{ overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
     .topbar-icon{
-      width:38px;height:38px;border-radius:10px;border:2px solid #111827;
-      display:flex;align-items:center;justify-content:center;font-weight:900;background:#fff;
+      width:38px;height:38px;border-radius:10px;border:1px solid #dce4ee;
+      display:flex;align-items:center;justify-content:center;color:var(--blue);font-size:18px;background:#fff;
     }
     .topbar-user{ display:flex;align-items:center;gap:12px;color:#111827;font-weight:700; }
     .topbar-actions{ display:flex;align-items:center;gap:10px; }
-    .menu-toggle{ display:none; border:0; background:#fff; font-size:24px; border-radius:10px; padding:6px 10px; }
+    .menu-toggle{ display:none; flex:0 0 auto; width:44px;height:44px;border:1px solid #dce4ee;background:#fff;color:#17263a;font-size:21px;border-radius:11px;padding:0;align-items:center;justify-content:center; }
 
-    .page-wrap{ max-width:1720px; margin:0 auto; padding:28px; }
-    .footer-note{ color:var(--muted); font-size:12px; text-align:center; padding:8px 0 24px; }
+    .page-wrap{ max-width:1720px; margin:0 auto; padding:26px 28px 30px; }
+    .footer-note{ color:var(--muted); font-size:12px; text-align:center; padding:4px 16px 24px; }
 
     .card{
       background:var(--surface);
@@ -632,36 +654,40 @@ BASE = """
       border-radius:var(--radius);
       box-shadow:var(--shadow);
     }
-    .card h5,.card h6{ font-weight:800; color:#0f172a; }
-    .alert{ border-radius:14px; border:1px solid #fde68a; box-shadow:0 10px 24px rgba(245,158,11,.12); }
+    .card h5,.card h6{ font-weight:750; color:#132238; letter-spacing:-.012em; }
+    .alert{ border-radius:12px; border:1px solid #f4d67a; box-shadow:0 6px 18px rgba(120,83,5,.08); }
 
-    .form-label{ color:#334155; font-weight:650; font-size:13px; }
+    .form-label{ color:#334155; font-weight:700; font-size:13px; margin-bottom:6px; }
     .form-control,.form-select{
       background:#fff;
       color:#0f172a;
-      border:1px solid #dbe3ee;
-      border-radius:10px;
-      min-height:42px;
+      border:1px solid #d6dfeb;
+      border-radius:9px;
+      min-height:44px;
       box-shadow:none;
     }
     .form-control:focus,.form-select:focus{
       border-color:#93b4ff;
-      box-shadow:0 0 0 .22rem rgba(37,99,235,.12);
+      box-shadow:0 0 0 .2rem rgba(31,95,174,.12);
     }
-    .btn{ border-radius:10px; font-weight:700; }
-    .btn-primary{ background:var(--blue); border-color:var(--blue); box-shadow:0 10px 18px rgba(37,99,235,.18); }
+    .form-text{ color:#718096; }
+    .form-check{ min-height:38px; display:flex; align-items:center; gap:7px; }
+    .form-check-input{ width:1.15em;height:1.15em;margin-top:0; }
+    .btn{ border-radius:9px; font-weight:700; min-height:40px; display:inline-flex;align-items:center;justify-content:center;gap:6px; }
+    .btn-sm{ min-height:34px; }
+    .btn-primary{ background:var(--blue); border-color:var(--blue); box-shadow:0 7px 16px rgba(31,95,174,.16); }
     .btn-primary:hover{ background:var(--blue-2); border-color:var(--blue-2); }
-    .btn-outline-primary{ border-color:#b8ccff; color:var(--blue); background:#fff; }
+    .btn-outline-primary{ border-color:#b8cce6; color:var(--blue); background:#fff; }
     .btn-outline-primary:hover{ background:var(--blue); color:white; border-color:var(--blue); }
     .btn-outline-success{ border-color:#bbf7d0;color:#15803d;background:#fff; }
     .btn-outline-danger{ border-color:#fecaca;color:#dc2626;background:#fff; }
 
-    .table-responsive{ border-radius:14px; border:1px solid var(--line); background:#fff; }
+    .table-responsive{ border-radius:12px; border:1px solid var(--line); background:#fff; overflow:auto; -webkit-overflow-scrolling:touch; scrollbar-width:thin; }
     .table{ margin-bottom:0; color:#0f172a; vertical-align:middle; }
     .table thead th{
-      background:#fff;
-      color:#0f172a;
-      font-weight:800;
+      background:#f8fafc;
+      color:#334155;
+      font-weight:750;
       border-bottom:1px solid var(--line);
       padding:14px 14px;
       white-space:nowrap;
@@ -680,10 +706,10 @@ BASE = """
     .kpi-card,.card .bg-light.border.rounded{
       background:#fff!important;
       border:1px solid var(--line)!important;
-      border-radius:14px!important;
+      border-radius:12px!important;
       padding:16px!important;
       min-height:92px;
-      box-shadow:0 10px 24px rgba(15,23,42,.045);
+      box-shadow:none;
     }
     .kpi-card strong,.card .bg-light.border.rounded strong{ display:block; color:#1455d9; font-size:19px; margin-top:8px; }
     .total-green,strong.total-green{ color:var(--green)!important; }
@@ -700,39 +726,73 @@ BASE = """
     .login-card{
       max-width:420px;
       margin:0 auto;
+      padding:22px!important;
     }
     .login-logo-wrap{
       margin-top:8vh;
       margin-bottom:12px;
     }
+    .guest-shell{ min-height:100svh; }
 
     @media (max-width: 992px){
       .app-shell{ display:block; }
-      .app-sidebar{ position:static; width:100%; min-height:auto; box-shadow:none; }
-      .sidebar-brand{ height:62px; }
-      .sidebar-user{ display:none; }
-      .sidebar-nav{ flex-direction:row; overflow:auto; padding:10px; gap:8px; }
-      .sidebar-nav a{ white-space:nowrap; padding:10px 12px; }
+      .app-sidebar{
+        position:fixed;width:min(86vw,320px);min-height:100dvh;height:100dvh;
+        transform:translateX(-105%);transition:transform .22s ease;
+        box-shadow:18px 0 48px rgba(3,12,24,.32);
+      }
+      .app-sidebar.open{ transform:translateX(0); }
+      .sidebar-brand{ height:66px;padding:0 16px 0 20px; }
+      .sidebar-close{ display:flex; }
+      .sidebar-user{ display:flex; }
+      .sidebar-nav{ padding:12px 10px; }
+      .sidebar-nav a{ min-height:48px; padding:11px 13px; }
+      .sidebar-mobile-footer{ display:block; }
+      .sidebar-mobile-footer .btn{ min-height:46px; }
+      .sidebar-backdrop{ position:fixed;inset:0;z-index:1035;background:rgba(8,18,32,.5);backdrop-filter:blur(2px); }
+      .sidebar-backdrop.show{ display:block; }
+      body.nav-open{ overflow:hidden; }
       .app-main{ margin-left:0; width:100%; }
-      .topbar{ height:62px; padding:0 16px; }
-      .topbar-title{ font-size:17px; }
-      .page-wrap{ padding:16px; }
+      .topbar{ height:66px; padding:0 16px; padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right)); }
+      .menu-toggle{ display:flex; }
+      .topbar-icon{ display:none; }
+      .topbar-title{ font-size:17px;gap:10px; }
+      .topbar-user,.topbar .badge{ display:none; }
+      .page-wrap{ padding:18px 16px 26px; padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right)); }
     }
     @media (max-width: 576px){
       body{ font-size:13px; }
-      .btn{ min-height:42px; }
+      .topbar{ padding-left:12px;padding-right:12px; }
+      .topbar-actions{ gap:6px; }
+      .logout-label{ display:none; }
+      .topbar-actions .btn{ width:42px;min-height:42px;padding:0; }
+      .page-wrap{ padding:14px 12px 24px; }
+      .card{ border-radius:12px; }
+      .card.p-3{ padding:14px!important; }
+      .card h5{ font-size:16px; }
+      .btn{ min-height:44px; }
+      .btn-sm{ min-height:38px; }
       .form-control,.form-select{ font-size:16px; }
-      .table{ white-space:nowrap; }
-      .topbar-user .badge{ display:none; }
+      textarea.form-control{ min-height:96px; }
+      .table{ white-space:nowrap; font-size:12px; }
+      .table thead th,.table tbody td{ padding:11px 10px; }
+      .table-responsive{ margin-left:-2px;margin-right:-2px;border-radius:10px; }
+      .d-flex.justify-content-between{ gap:10px;flex-wrap:wrap; }
+      .text-end .btn,.text-end form.d-inline{ margin-top:3px;margin-bottom:3px; }
+      .footer-note{ line-height:1.65;padding-bottom:max(20px,env(safe-area-inset-bottom)); }
+      .login-logo-wrap{ margin-top:3vh; }
+      .login-card{ padding:18px!important; }
     }
+    @media (prefers-reduced-motion:reduce){ *,*::before,*::after{ scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important; } }
   </style>
 </head>
 <body>
 {% if current_user.is_authenticated %}
 <div class="app-shell">
-  <aside class="app-sidebar">
+  <aside class="app-sidebar" id="appSidebar" aria-label="Nawigacja główna">
     <div class="sidebar-brand">
       <span>EKKO NOR</span>
+      <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Zamknij menu"><i class="bi bi-x-lg"></i></button>
     </div>
     <div class="sidebar-user">
       <div class="avatar">{{ (current_user.name or 'U')[:1] }}</div>
@@ -743,38 +803,43 @@ BASE = """
     </div>
     <nav class="sidebar-nav">
       {% if current_user.is_admin %}
-        <a class="{% if request.endpoint == 'admin_overview' %}active{% endif %}" href="{{ url_for('admin_overview') }}"><span class="nav-ico">⌂</span>Panel główny</a>
-        <a class="{% if request.endpoint in ['admin_projects','admin_project_update','admin_project_toggle','admin_project_delete'] %}active{% endif %}" href="{{ url_for('admin_projects') }}"><span class="nav-ico">▣</span>Projekty</a>
-        <a class="{% if request.endpoint in ['admin_entries','admin_entry_edit'] %}active{% endif %}" href="{{ url_for('admin_entries') }}"><span class="nav-ico">◷</span>Ewidencja godzin</a>
-        <a class="{% if request.endpoint in ['admin_extras','admin_extra_reports','admin_extra_report_view'] %}active{% endif %}" href="{{ url_for('admin_extras') }}"><span class="nav-ico">＋</span>Dodatki</a>
-        <a class="{% if request.endpoint in ['admin_costs','admin_cost_edit'] %}active{% endif %}" href="{{ url_for('admin_costs') }}"><span class="nav-ico">◇</span>Koszty</a>
-        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><span class="nav-ico">□</span>Urlopy</a>
-        <a class="{% if request.endpoint in ['admin_users','admin_user_edit'] %}active{% endif %}" href="{{ url_for('admin_users') }}"><span class="nav-ico">♙</span>Pracownicy</a>
-        <a class="{% if request.endpoint in ['admin_reports','admin_reports_export','admin_reports_payroll'] %}active{% endif %}" href="{{ url_for('admin_reports') }}"><span class="nav-ico">▤</span>Raporty</a>
-        <a class="{% if request.endpoint in ['admin_plans','plans'] %}active{% endif %}" href="{{ url_for('admin_plans') }}"><span class="nav-ico">▧</span>Plany</a>
-        <a class="{% if request.endpoint in ['admin_payroll','admin_payroll_export'] %}active{% endif %}" href="{{ url_for('admin_payroll') }}"><span class="nav-ico">$</span>Wypłaty</a>
-        <a class="{% if request.endpoint == 'admin_backup' %}active{% endif %}" href="{{ url_for('admin_backup') }}"><span class="nav-ico">↧</span>Backup</a>
+        <a class="{% if request.endpoint == 'admin_overview' %}active{% endif %}" href="{{ url_for('admin_overview') }}"><i class="nav-ico bi bi-grid-1x2"></i>Panel główny</a>
+        <a class="{% if request.endpoint in ['admin_projects','admin_project_update','admin_project_toggle','admin_project_delete'] %}active{% endif %}" href="{{ url_for('admin_projects') }}"><i class="nav-ico bi bi-buildings"></i>Projekty</a>
+        <a class="{% if request.endpoint in ['admin_entries','admin_entry_edit'] %}active{% endif %}" href="{{ url_for('admin_entries') }}"><i class="nav-ico bi bi-clock-history"></i>Ewidencja godzin</a>
+        <a class="{% if request.endpoint in ['admin_extras','admin_extra_reports','admin_extra_report_view'] %}active{% endif %}" href="{{ url_for('admin_extras') }}"><i class="nav-ico bi bi-plus-circle"></i>Dodatki</a>
+        <a class="{% if request.endpoint in ['admin_costs','admin_cost_edit'] %}active{% endif %}" href="{{ url_for('admin_costs') }}"><i class="nav-ico bi bi-receipt"></i>Koszty</a>
+        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><i class="nav-ico bi bi-calendar2-week"></i>Urlopy</a>
+        <a class="{% if request.endpoint in ['admin_users','admin_user_edit'] %}active{% endif %}" href="{{ url_for('admin_users') }}"><i class="nav-ico bi bi-people"></i>Pracownicy</a>
+        <a class="{% if request.endpoint in ['admin_reports','admin_reports_export','admin_reports_payroll'] %}active{% endif %}" href="{{ url_for('admin_reports') }}"><i class="nav-ico bi bi-bar-chart"></i>Raporty</a>
+        <a class="{% if request.endpoint in ['admin_plans','plans'] %}active{% endif %}" href="{{ url_for('admin_plans') }}"><i class="nav-ico bi bi-file-earmark-pdf"></i>Plany</a>
+        <a class="{% if request.endpoint in ['admin_payroll','admin_payroll_export'] %}active{% endif %}" href="{{ url_for('admin_payroll') }}"><i class="nav-ico bi bi-cash-stack"></i>Wypłaty</a>
+        <a class="{% if request.endpoint == 'admin_backup' %}active{% endif %}" href="{{ url_for('admin_backup') }}"><i class="nav-ico bi bi-cloud-arrow-down"></i>Backup</a>
       {% else %}
-        <a class="{% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><span class="nav-ico">◷</span>Godziny</a>
-        <a class="{% if request.endpoint == 'extras' %}active{% endif %}" href="{{ url_for('extras') }}"><span class="nav-ico">＋</span>Dodatki</a>
-        <a class="{% if request.endpoint == 'user_summary' %}active{% endif %}" href="{{ url_for('user_summary') }}"><span class="nav-ico">▤</span>Podsumowanie</a>
-        <a class="{% if request.endpoint == 'user_costs' %}active{% endif %}" href="{{ url_for('user_costs') }}"><span class="nav-ico">◇</span>Koszty</a>
-        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><span class="nav-ico">□</span>Urlopy</a>
-        <a class="{% if request.endpoint == 'plans' %}active{% endif %}" href="{{ url_for('plans') }}"><span class="nav-ico">▧</span>Plany</a>
+        <a class="{% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><i class="nav-ico bi bi-clock-history"></i>Godziny</a>
+        <a class="{% if request.endpoint == 'extras' %}active{% endif %}" href="{{ url_for('extras') }}"><i class="nav-ico bi bi-plus-circle"></i>Dodatki</a>
+        <a class="{% if request.endpoint == 'user_summary' %}active{% endif %}" href="{{ url_for('user_summary') }}"><i class="nav-ico bi bi-bar-chart"></i>Podsumowanie</a>
+        <a class="{% if request.endpoint == 'user_costs' %}active{% endif %}" href="{{ url_for('user_costs') }}"><i class="nav-ico bi bi-receipt"></i>Koszty</a>
+        <a class="{% if request.endpoint == 'leaves' %}active{% endif %}" href="{{ url_for('leaves') }}"><i class="nav-ico bi bi-calendar2-week"></i>Urlopy</a>
+        <a class="{% if request.endpoint == 'plans' %}active{% endif %}" href="{{ url_for('plans') }}"><i class="nav-ico bi bi-file-earmark-pdf"></i>Plany</a>
       {% endif %}
     </nav>
+    <div class="sidebar-mobile-footer">
+      <a class="btn btn-outline-light w-100" href="{{ url_for('logout') }}"><i class="bi bi-box-arrow-right"></i> Wyloguj</a>
+    </div>
   </aside>
+  <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
 
   <main class="app-main">
     <header class="topbar">
       <div class="topbar-title">
-        <span class="topbar-icon">{% if title == 'Wypłaty' %}${% elif 'Koszty' in (title or '') %}◇{% elif 'Urlopy' in (title or '') %}□{% else %}☰{% endif %}</span>
+        <button class="menu-toggle" id="menuToggle" type="button" aria-controls="appSidebar" aria-expanded="false" aria-label="Otwórz menu"><i class="bi bi-list"></i></button>
+        <span class="topbar-icon"><i class="bi {% if title == 'Wypłaty' %}bi-cash-stack{% elif 'Koszty' in (title or '') %}bi-receipt{% elif 'Urlopy' in (title or '') %}bi-calendar2-week{% else %}bi-grid{% endif %}"></i></span>
         <span>{{ title or 'Panel' }}</span>
       </div>
       <div class="topbar-actions">
         <span class="badge bg-light text-dark border">{{ app_version }}</span>
         <div class="topbar-user">{{ current_user.name }} <span class="text-muted">⌄</span></div>
-        <a class="btn btn-sm btn-outline-danger" href="{{ url_for('logout') }}">Wyloguj</a>
+        <a class="btn btn-sm btn-outline-danger" href="{{ url_for('logout') }}" aria-label="Wyloguj"><i class="bi bi-box-arrow-right"></i><span class="logout-label">Wyloguj</span></a>
       </div>
     </header>
 
@@ -790,7 +855,7 @@ BASE = """
   </main>
 </div>
 {% else %}
-<div class="container py-5">
+<div class="container py-4 py-md-5 guest-shell">
   {% with messages = get_flashed_messages() %}
     {% if messages %}<div class="alert alert-warning">{{ messages[0] }}</div>{% endif %}
   {% endwith %}
@@ -807,6 +872,39 @@ function limitFiles(input, max){
     input.value = '';
   }
 }
+
+(function(){
+  const sidebar = document.getElementById('appSidebar');
+  const openButton = document.getElementById('menuToggle');
+  const closeButton = document.getElementById('sidebarClose');
+  const backdrop = document.getElementById('sidebarBackdrop');
+  if (!sidebar || !openButton || !backdrop) return;
+
+  function setMenu(open){
+    sidebar.classList.toggle('open', open);
+    backdrop.classList.toggle('show', open);
+    document.body.classList.toggle('nav-open', open);
+    openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+    backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (open && closeButton) closeButton.focus();
+    if (!open) openButton.focus();
+  }
+
+  openButton.addEventListener('click', function(){ setMenu(true); });
+  if (closeButton) closeButton.addEventListener('click', function(){ setMenu(false); });
+  backdrop.addEventListener('click', function(){ setMenu(false); });
+  document.addEventListener('keydown', function(event){
+    if (event.key === 'Escape' && sidebar.classList.contains('open')) setMenu(false);
+  });
+  sidebar.querySelectorAll('a').forEach(function(link){
+    link.addEventListener('click', function(){
+      if (window.innerWidth <= 992) setMenu(false);
+    });
+  });
+  window.addEventListener('resize', function(){
+    if (window.innerWidth > 992 && sidebar.classList.contains('open')) setMenu(false);
+  });
+})();
 </script>
 </body>
 </html>
@@ -1094,12 +1192,6 @@ def dashboard():
         valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
         if len(valid_images) > 5:
             flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
-            return redirect(url_for('admin_entries'))
-
-
-        valid_images = [f for f in images_files if f and getattr(f, 'filename', '')]
-        if len(valid_images) > 5:
-            flash('Możesz dodać maksymalnie 5 zdjęć do jednego wpisu.')
             return redirect(url_for('dashboard'))
 
         # Konwersja daty z formularza
@@ -1206,12 +1298,6 @@ def dashboard():
       <div class="small text-muted mt-1" id="uploadText">0%</div>
     </div>
 
-    <div id="uploadProgressAdmin" class="col-12" style="display:none;">
-      <div class="progress">
-        <div id="uploadBarAdmin" class="progress-bar" role="progressbar" style="width:0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
-      </div>
-      <div class="small text-muted mt-1" id="uploadTextAdmin">0%</div>
-    </div>
         <div class="col-12">
           <button class="btn btn-primary">Zapisz</button>
         </div>
@@ -1240,7 +1326,6 @@ def dashboard():
                   {% for img in e.images %}
                     <a href="{{ url_for('entry_image_view', image_id=img.id) }}" target="_blank" rel="noopener">IMG</a>{% if not loop.last %} {% endif %}
                   {% endfor %}
-                  </div>
                 {% else %}-{% endif %}
               </td>
               <td>{{ fmt(e.minutes) }}</td>
@@ -1324,7 +1409,6 @@ function wireUploadProgress(formId, progressId, barId, textId){
 
 document.addEventListener('DOMContentLoaded', function(){
   wireUploadProgress('entryForm','uploadProgress','uploadBar','uploadText');
-  wireUploadProgress('adminEntryForm','uploadProgressAdmin','uploadBarAdmin','uploadTextAdmin');
 });
 </script>
 </div>
