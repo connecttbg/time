@@ -18,7 +18,15 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import text as sql_text, and_, or_
 
-APP_VERSION = "v46-mobile-polish"
+APP_VERSION = "v47-ekko-nord"
+
+# Dane firmy używane w interfejsie i korespondencji.
+# Pełna nazwa prawna i adres są zgodne z rejestrem Brønnøysund.
+COMPANY_DISPLAY_NAME = "EKKO NORD"
+COMPANY_LEGAL_NAME = "EKKO NORD K. KEPA"
+COMPANY_ORG_NUMBER = "938 255 733"
+COMPANY_ADDRESS = "Kapellveien 22A"
+COMPANY_POSTAL_CITY = "1410 KOLBOTN"
 
 
 # Zdjęcia: kompresja i konwersja do JPEG przy zapisie
@@ -520,7 +528,7 @@ BASE = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#102033">
-  <title>{{ title or 'EKKO NOR AS' }}</title>
+  <title>{{ title or company_display_name }}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
@@ -791,7 +799,7 @@ BASE = """
 <div class="app-shell">
   <aside class="app-sidebar" id="appSidebar" aria-label="Nawigacja główna">
     <div class="sidebar-brand">
-      <span>EKKO NOR</span>
+      <span>{{ company_display_name }}</span>
       <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Zamknij menu"><i class="bi bi-x-lg"></i></button>
     </div>
     <div class="sidebar-user">
@@ -851,7 +859,7 @@ BASE = """
       {% endwith %}
       {{ body|safe }}
     </div>
-    <div class="footer-note">Ekko Nor AS · Bruseveien 8A · 1911 Flateby · Admin: dataconnect.no</div>
+    <div class="footer-note">{{ company_legal_name }} · Org.nr. {{ company_org_number }} · {{ company_address }} · {{ company_postal_city }} · Admin: dataconnect.no</div>
   </main>
 </div>
 {% else %}
@@ -910,7 +918,18 @@ function limitFiles(input, max){
 </html>
 """
 def layout(title, body):
-    return render_template_string(BASE, title=title, body=body, fmt=fmt_hhmm, app_version=APP_VERSION)
+    return render_template_string(
+        BASE,
+        title=title,
+        body=body,
+        fmt=fmt_hhmm,
+        app_version=APP_VERSION,
+        company_display_name=COMPANY_DISPLAY_NAME,
+        company_legal_name=COMPANY_LEGAL_NAME,
+        company_org_number=COMPANY_ORG_NUMBER,
+        company_address=COMPANY_ADDRESS,
+        company_postal_city=COMPANY_POSTAL_CITY,
+    )
 
 
 
@@ -957,7 +976,7 @@ def _send_smtp_email(to_email, subject, body):
       SMTP_SSL=1  (force SSL)
       SMTP_STARTTLS=0 (disable starttls for non-SSL connections)
       SMTP_FROM (defaults to SMTP_USER)
-      SMTP_FROM_NAME (defaults to "EKKO NOR AS")
+      SMTP_FROM_NAME (defaults to COMPANY_LEGAL_NAME)
     """
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     smtp_port = int((os.getenv("SMTP_PORT", "587") or "587").strip())
@@ -968,7 +987,7 @@ def _send_smtp_email(to_email, subject, body):
         raise RuntimeError("Brak SMTP_HOST/SMTP_USER/SMTP_PASSWORD w zmiennych środowiskowych.")
 
     from_email = (os.getenv("SMTP_FROM", smtp_user) or smtp_user).strip()
-    from_name = (os.getenv("SMTP_FROM_NAME", "EKKO NOR AS") or "EKKO NOR AS").strip()
+    from_name = (os.getenv("SMTP_FROM_NAME", COMPANY_LEGAL_NAME) or COMPANY_LEGAL_NAME).strip()
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -2670,11 +2689,11 @@ def admin_backup_email():
     fname = f"app_backup_{ts}.zip"
 
     msg = EmailMessage()
-    msg["Subject"] = f"Kopia zapasowa EKKO NOR – {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+    msg["Subject"] = f"Kopia zapasowa {COMPANY_DISPLAY_NAME} – {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
     msg["From"] = backup_from
     msg["To"] = backup_to
     msg.set_content(
-        "Kopia zapasowa bazy danych aplikacji EKKO NOR.\n"
+        f"Kopia zapasowa bazy danych aplikacji {COMPANY_DISPLAY_NAME}.\n"
         "Ta wiadomość została wygenerowana automatycznie przez system."
     )
     msg.add_attachment(data, maintype="application", subtype="zip", filename=fname)
@@ -5304,7 +5323,7 @@ def admin_extra_report_view(report_id):
             db.session.commit()
 
             link = url_for("extra_report_public", token=rep.token, _external=True)
-            subject = "Tilleggsrapport fra EKKO NOR AS"
+            subject = f"Tilleggsrapport fra {COMPANY_LEGAL_NAME}"
 
             # informacja o auto-akceptacji po 7 dniach (w treści maila)
 
@@ -5342,7 +5361,7 @@ def admin_extra_report_view(report_id):
 
                 "Ta gjerne kontakt dersom dere har spørsmål eller merknader.\n\n"
 
-                "Med vennlig hilsen\nEKKO NOR AS\n"
+                f"Med vennlig hilsen\n{COMPANY_LEGAL_NAME}\n"
 
             )
 
@@ -5350,14 +5369,14 @@ def admin_extra_report_view(report_id):
             html_body = f'''<!doctype html>
 <html><body style=\"font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111;\">
   <div style=\"max-width:640px;margin:0 auto;\">
-    <img src=\"{logo_url}\" alt=\"EKKO NOR AS\" style=\"max-width:220px;height:auto;display:block;margin:0 0 16px 0;\">
+    <img src=\"{logo_url}\" alt=\"{COMPANY_DISPLAY_NAME}\" style=\"max-width:220px;height:auto;display:block;margin:0 0 16px 0;\">
     <p>Hei!</p>
     <p>I lenken nedenfor sender vi dere rapporten.</p>
     <p><strong>Vennligst godkjenn {deadline_txt}</strong>. Dersom vi ikke mottar tilbakemelding innen fristen, vil rapporten bli automatisk godkjent.</p>
     <p><a href=\"{link}\" style=\"display:inline-block;padding:10px 14px;background:#0d6efd;color:#fff;text-decoration:none;border-radius:6px;\">Åpne rapport</a></p>
     <p>Hvis knappen ikke fungerer, bruk denne lenken:<br><a href=\"{link}\">{link}</a></p>
     <p>Ta gjerne kontakt dersom dere har spørsmål eller merknader.</p>
-    <p>Med vennlig hilsen<br><strong>EKKO NOR AS</strong></p>
+    <p>Med vennlig hilsen<br><strong>{COMPANY_LEGAL_NAME}</strong></p>
   </div>
 </body></html>'''
 
@@ -5716,9 +5735,9 @@ def extra_report_public(token):
   </style>
   <div class="card p-3">
     <div class="report-head">
-      <div><img src="{{ url_for('static', filename='img/logo.png') }}" alt="EKKO NOR AS"></div>
+      <div><img src="{{ url_for('static', filename='img/logo.png') }}" alt="EKKO NORD"></div>
       <div class="flex-grow-1">
-        <div class="small text-muted mb-1">EKKO NOR AS</div>
+        <div class="small text-muted mb-1">EKKO NORD K. KEPA</div>
       </div>
     </div>
     <div class="d-flex justify-content-between align-items-start">
@@ -6031,7 +6050,7 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
         topMargin=14 * mm,
         bottomMargin=14 * mm,
         title=f"Tilleggsrapport {rep.id}",
-        author="EKKO NOR AS",
+        author=COMPANY_LEGAL_NAME,
     )
 
     styles = getSampleStyleSheet()
@@ -6048,12 +6067,12 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
         try:
             header_left.append(Image(logo_path, width=45 * mm, height=14 * mm))
         except Exception:
-            header_left.append(Paragraph("EKKO NOR AS", small))
+            header_left.append(Paragraph(COMPANY_LEGAL_NAME, small))
     else:
-        header_left.append(Paragraph("EKKO NOR AS", small))
+        header_left.append(Paragraph(COMPANY_LEGAL_NAME, small))
 
     header_right = Paragraph(
-        "<b>EKKO NOR AS</b><br/>Bruseveien 8A<br/>1911 Flateby",
+        f"<b>{COMPANY_LEGAL_NAME}</b><br/>{COMPANY_ADDRESS}<br/>{COMPANY_POSTAL_CITY}<br/>Org.nr. {COMPANY_ORG_NUMBER}",
         small,
     )
 
@@ -6203,7 +6222,7 @@ def _extra_report_build_pdf(rep, lang: str = "no") -> io.BytesIO:
 
     # stopka
     elements.append(Spacer(1, 10))
-    elements.append(Paragraph("EKKO NOR AS", small))
+    elements.append(Paragraph(COMPANY_LEGAL_NAME, small))
 
     doc.build(elements)
     buf.seek(0)
@@ -7029,3 +7048,4 @@ def _send_email_smtp(to, subject, body, attachments=None):
                 server.ehlo()
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
+
